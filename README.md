@@ -1,4 +1,4 @@
-# update-clean
+# debian_update_clean
 
 One clean update and cleanup script for **Debian** and **Ubuntu** (and other apt-based derivatives).
 
