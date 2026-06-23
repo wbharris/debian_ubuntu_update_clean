@@ -75,6 +75,17 @@ _record_failure() { EXIT_CODE=$((EXIT_CODE + 1)); }
 
 has_cmd() { command -v "$1" >/dev/null 2>&1; }
 
+require_cmds() {
+    local -a cmds=(apt-get dpkg awk sed grep tar mktemp flock)
+    local cmd
+    for cmd in "${cmds[@]}"; do
+        if ! has_cmd "$cmd"; then
+            error "Required command missing: $cmd"
+            exit 1
+        fi
+    done
+}
+
 load_config_files() {
     local conf owner
     local -a confs=(/etc/update-clean.conf)
@@ -123,6 +134,7 @@ validate_config_values() {
 }
 
 validate_config_values
+require_cmds
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -130,11 +142,31 @@ export APT_LISTCHANGES_FRONTEND=none
 # ────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────
+df_supports_output() {
+    df --help 2>&1 | grep -q -- '--output'
+}
+
 get_avail_kb() {
     local part="$1"
     local val
-    val=$(df --output=avail "$part" 2>/dev/null | awk 'NR==2 {print $1+0}')
+
+    if df_supports_output; then
+        val=$(df --output=avail "$part" 2>/dev/null | awk 'NR==2 {print $1+0}')
+    else
+        val=$(df -k "$part" 2>/dev/null | awk 'NR==2 {print $4+0}')
+    fi
     printf '%d' "${val:-0}"
+}
+
+get_used_kb_for_paths() {
+    local sum=0
+
+    if df_supports_output; then
+        sum=$(df --output=used "$@" 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
+    else
+        sum=$(df -k "$@" 2>/dev/null | awk 'NR>1 {s+=$3} END {print s+0}')
+    fi
+    printf '%d' "${sum:-0}"
 }
 
 check_partition_space() {
@@ -636,7 +668,7 @@ Usage: sudo $0 [options]
 Options:
   --dry-run         Simulate actions without making changes
   --no-kernel       Skip old kernel removal
-  --keep-kernels N  Keep N kernels besides running (default: 2)
+  --keep-kernels N  Keep N kernels besides running (default: 2; 0 = only running)
   --reboot-if-required  Reboot automatically when required
   --offline         Skip internet connectivity checks
   --last, --status  Show information from the last run
@@ -883,7 +915,7 @@ done
 
 warn_low_partition_space "/boot" 51200
 
-if has_cmd fuser && is_apt_locked; then
+if is_apt_locked; then
     warn "APT is locked by another process. Waiting up to 60s..."
     for _ in {1..12}; do
         if ! is_apt_locked; then
@@ -895,15 +927,13 @@ if has_cmd fuser && is_apt_locked; then
         error "APT still locked after waiting. Please resolve and try again."
         exit 1
     fi
-elif ! has_cmd fuser; then
-    warn "fuser not available; skipping APT lock check"
 fi
 
 if ! check_systemd_resolved; then
     warn "systemd-resolved is not active. DNS resolution may be affected."
 fi
 
-BEFORE=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
+BEFORE=$(get_used_kb_for_paths / /var /boot)
 
 # ────────────────────────────────────────────────────────────────
 # File lock + trap
@@ -914,6 +944,22 @@ if ! flock -n 200; then
     error "Another instance of $SCRIPT_NAME is already running."
     exit 1
 fi
+
+err_trap() {
+    local rc=$?
+    local cmd=${BASH_COMMAND:-}
+    local lineno=${BASH_LINENO[0]:-?}
+    local i
+
+    _record_failure
+    error "Unhandled error (rc=$rc) while running: '$cmd' at or near line $lineno"
+    if [ "${#BASH_SOURCE[@]}" -gt 1 ]; then
+        error "Call stack (most recent call last):"
+        for ((i = 1; i < ${#BASH_SOURCE[@]}; i++)); do
+            error "  ${BASH_SOURCE[i]}:${BASH_LINENO[i - 1]} ${FUNCNAME[i]:-main}"
+        done
+    fi
+}
 
 cleanup() {
     trap - INT TERM EXIT ERR
@@ -929,7 +975,7 @@ cleanup() {
 }
 
 trap 'cleanup $?' INT TERM EXIT
-trap 'rc=$?; _record_failure; error "Unhandled error (rc=$rc) at or near line ${LINENO:-?}";' ERR
+trap 'err_trap' ERR
 
 # ────────────────────────────────────────────────────────────────
 # Core update
@@ -1071,7 +1117,7 @@ fi
 # ────────────────────────────────────────────────────────────────
 # Final status & summary
 # ────────────────────────────────────────────────────────────────
-AFTER=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
+AFTER=$(get_used_kb_for_paths / /var /boot)
 FREED_MB=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
 
 REBOOT_DURING_RUN=false

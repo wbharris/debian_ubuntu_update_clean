@@ -83,7 +83,7 @@ CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 
 **Config security:** `/etc/update-clean.conf` must be owned by root (non-root-owned system config is skipped). User-level configs are sourced without ownership checks — only use configs you trust.
 
-**KERNEL_KEEP:** number of installed kernel packages to retain *besides* the running kernel (default: 2). Override with `--keep-kernels N` or `KERNEL_KEEP=N` in config.
+**KERNEL_KEEP:** number of installed kernel packages to retain *besides* the running kernel (default: 2; `0` keeps only the running kernel). Override with `--keep-kernels N` or `KERNEL_KEEP=N` in config.
 
 **BACKUP_MODE:** when `true`, creates a `/var/backups/etc-before-cleanup-*.tar.gz` archive before purging residual config packages (excludes `/etc/ssl/private`, stays on local filesystem).
 

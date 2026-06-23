@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.6] - 2026-06-22
+
+### Added
+- `require_cmds()` early check for apt-get, dpkg, awk, sed, grep, tar, mktemp, flock
+- `get_used_kb_for_paths()` and `df_supports_output()` for portable disk usage
+- `err_trap()` with failing command and call stack on ERR
+
+### Changed
+- APT lock wait uses `is_apt_locked()` unconditionally (fuser, lsof, or fallback)
+- `get_avail_kb()` falls back to `df -k` when `--output` is unavailable
+
+### Fixed
+- APT lock check skipped when `fuser` missing but `lsof` was available
+
 ## [1.4.5] - 2026-06-22
 
 ### Added
