@@ -110,3 +110,15 @@ sudo systemctl enable --now update-clean.timer
 - Version is in the `VERSION` file
 - Script supports `--version`
 - See `CHANGELOG.md` for history
+
+### Repository layout
+
+```
+update-clean.sh          # main script
+VERSION                  # release version
+CHANGELOG.md             # change history
+README.md                # documentation
+update-clean.conf.example
+.github/workflows/       # CI (ShellCheck)
+systemd/                 # optional weekly timer
+```

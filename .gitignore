@@ -15,3 +15,9 @@ secrets/
 .idea/
 .vscode/
 *.swp
+
+# Local helpers / backups
+push.sh
+cleanup-push.sh
+*.bak
+*.bak-*

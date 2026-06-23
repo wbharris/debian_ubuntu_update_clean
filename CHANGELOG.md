@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.1] - 2026-06-23
+
+### Removed
+- Temporary `push.sh` helper script from the repository
+
+### Changed
+- `.gitignore` now excludes local helper scripts and backup files
+
 ## [1.2.0] - 2026-06-23
 
 ### Added
