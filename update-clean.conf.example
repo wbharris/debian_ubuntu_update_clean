@@ -1,0 +1,8 @@
+# Optional configuration for update-clean.sh
+# Copy to one of:
+#   /etc/update-clean.conf
+#   ~/.config/update-clean.conf
+#   ~/.update-clean.conf
+
+# Number of log files to retain (default: 3)
+# LOG_RETENTION=5

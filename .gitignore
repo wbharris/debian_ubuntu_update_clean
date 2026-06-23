@@ -1,0 +1,17 @@
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs and temp
+*.log
+*.tmp
+
+# Sensitive
+*.key
+*.pem
+secrets/
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
