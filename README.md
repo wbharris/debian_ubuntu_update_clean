@@ -52,6 +52,7 @@ sudo ./update-clean.sh --dry-run
 sudo ./update-clean.sh --no-kernel
 sudo ./update-clean.sh --keep-kernels 3
 sudo ./update-clean.sh --reboot-if-required
+sudo ./update-clean.sh --offline
 sudo ./update-clean.sh --check
 sudo ./update-clean.sh --last
 sudo ./update-clean.sh --debug
@@ -91,6 +92,7 @@ CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 - Detailed logs: `/var/log/update-clean/`
 - Only the most recent 3 logs are kept automatically
 - Last run record: `/var/lib/update-clean/last-run` (includes `STATUS`, `FAILURES`, and `LOG_FILE`)
+- Machine-readable summary: `/var/lib/update-clean/last-run.json` (when `jq` is installed)
 - `sudo ./update-clean.sh --last` shows the record plus the last 80 lines of the log
 
 ### Safety

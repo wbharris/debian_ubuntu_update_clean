@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.5] - 2026-06-22
+
+### Added
+- `--offline` flag to skip internet connectivity checks
+- `apt_get_update_with_retries()` with exponential backoff (3 attempts)
+- `last-run.json` written when `jq` is available
+- Kernel removal skipped when `/boot` has less than 10 MB free
+
+### Changed
+- `dump_debug_state()` uses safe defaults for unset variables
+- ERR trap reports captured exit code (`rc=$?`)
+- Normalized `PATH` to system directories first
+- `readonly` on `SCRIPT_NAME` and `SCRIPT_DIR`
+- `apt_run()` documents pipefail exit-code preservation
+
 ## [1.4.4] - 2026-06-22
 
 ### Added

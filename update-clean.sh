@@ -21,6 +21,9 @@ fi
 
 umask 022
 
+PATH="/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export PATH
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 if [ ! -d "$SCRIPT_DIR" ] || [ ! -r "$SCRIPT_DIR" ]; then
     printf '%s\n' "Error: Cannot access script directory: $SCRIPT_DIR" >&2
@@ -33,13 +36,15 @@ fi
 DRY_RUN=false
 SKIP_KERNEL=false
 DEBUG=false
+SKIP_CONNECTIVITY=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 KERNEL_KEEP=${KERNEL_KEEP:-2}
 BACKUP_MODE=${BACKUP_MODE:-false}
 REBOOT_IF_REQUIRED=${REBOOT_IF_REQUIRED:-false}
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
-SCRIPT_NAME="update-clean"
+readonly SCRIPT_NAME="update-clean"
 SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
+readonly SCRIPT_DIR
 EXIT_CODE=0
 KERNELS_REMOVED=false
 
@@ -190,10 +195,11 @@ dump_debug_state() {
     $DEBUG || return
     printf 'DEBUG STATE:\n'
     printf '  KERNEL_KEEP=%s SKIP_KERNEL=%s DRY_RUN=%s DEBUG=%s\n' \
-        "$KERNEL_KEEP" "$SKIP_KERNEL" "$DRY_RUN" "$DEBUG"
+        "${KERNEL_KEEP:-}" "${SKIP_KERNEL:-}" "${DRY_RUN:-}" "${DEBUG:-}"
     printf '  LOG_DIR=%s\n  LOG_FILE=%s\n  APT_LOG=%s\n' \
-        "$LOG_DIR" "$LOG_FILE" "$APT_LOG"
-    printf '  DISTRO=%s ARCHIVE_HOST=%s\n' "$DISTRO_NAME" "${ARCHIVE_HOST:-}"
+        "${LOG_DIR:-<unset>}" "${LOG_FILE:-<unset>}" "${APT_LOG:-<unset>}"
+    printf '  DISTRO=%s ARCHIVE_HOST=%s SKIP_CONNECTIVITY=%s\n' \
+        "${DISTRO_NAME:-<unset>}" "${ARCHIVE_HOST:-<unset>}" "${SKIP_CONNECTIVITY:-}"
 }
 
 format_cmd_args() {
@@ -418,16 +424,43 @@ apt_run() {
         "${args[@]}"
     )
 
+    # pipefail ensures apt-get exit code is preserved through tee
     if ! DEBIAN_FRONTEND=noninteractive "${cmd[@]}" 2>&1 | tee -a "$apt_log"; then
         _record_failure
         return 1
     fi
+    return 0
+}
+
+apt_get_update_with_retries() {
+    local attempt=0 max=3
+    local apt_log="${APT_LOG:-/dev/null}"
+
+    while :; do
+        if apt-get update 2>&1 | tee -a "$apt_log"; then
+            return 0
+        fi
+        attempt=$((attempt + 1))
+        if [ "$attempt" -ge "$max" ]; then
+            return 1
+        fi
+        warn "apt-get update failed, retrying (attempt $((attempt + 1))/$max)..."
+        sleep $((attempt * 2))
+    done
 }
 
 remove_old_kernels() {
     local -a kernels=()
     local -a to_remove=()
-    local running_pkg running_ver pkg i delcount
+    local running_pkg running_ver pkg i delcount boot_kb
+
+    if [ -d /boot ]; then
+        boot_kb=$(get_avail_kb /boot)
+        if [ "$boot_kb" -lt 10240 ]; then
+            warn "Skipping kernel removal: /boot has less than 10 MB free"
+            return 0
+        fi
+    fi
 
     running_ver=$(uname -r 2>/dev/null || true)
     running_pkg=$(find_running_kernel_pkg "$running_ver" || true)
@@ -605,6 +638,7 @@ Options:
   --no-kernel       Skip old kernel removal
   --keep-kernels N  Keep N kernels besides running (default: 2)
   --reboot-if-required  Reboot automatically when required
+  --offline         Skip internet connectivity checks
   --last, --status  Show information from the last run
   --check, --doctor Run pre-flight checks only (no updates)
   --debug           Enable shell trace (set -x) for troubleshooting
@@ -671,7 +705,9 @@ run_preflight_checks() {
         printf ' (%s)' "$ARCHIVE_HOST"
     fi
     printf ': '
-    if check_connectivity; then
+    if $SKIP_CONNECTIVITY; then
+        printf '%s\n' "SKIPPED (--offline)"
+    elif check_connectivity; then
         printf '%s\n' "OK"
     else
         printf '%s\n' "FAIL"
@@ -738,6 +774,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --reboot-if-required)
             REBOOT_IF_REQUIRED=true
+            shift
+            ;;
+        --offline)
+            SKIP_CONNECTIVITY=true
             shift
             ;;
         --last|--status)
@@ -827,10 +867,14 @@ if [ "$EUID" -ne 0 ]; then
     exit 1
 fi
 
-info "Checking internet connectivity..."
-if ! check_connectivity; then
-    error "No internet connection detected."
-    exit 1
+if $SKIP_CONNECTIVITY; then
+    warn "Skipping internet connectivity check (--offline)"
+else
+    info "Checking internet connectivity..."
+    if ! check_connectivity; then
+        error "No internet connection detected."
+        exit 1
+    fi
 fi
 
 for partition in "/" "/var" "/boot"; do
@@ -885,7 +929,7 @@ cleanup() {
 }
 
 trap 'cleanup $?' INT TERM EXIT
-trap '_record_failure; error "Unhandled error on line $LINENO in ${FUNCNAME[0]:-main}"' ERR
+trap 'rc=$?; _record_failure; error "Unhandled error (rc=$rc) at or near line ${LINENO:-?}";' ERR
 
 # ────────────────────────────────────────────────────────────────
 # Core update
@@ -903,8 +947,8 @@ info "Updating package lists..."
 if $DRY_RUN; then
     info "DRY-RUN: Would run apt-get update (skipped)"
 else
-    if ! apt-get update 2>&1 | tee -a "${APT_LOG:-/dev/null}"; then
-        warn "apt-get update had issues"
+    if ! apt_get_update_with_retries; then
+        warn "apt-get update had issues after retries"
         _record_failure
     fi
 fi
@@ -1057,16 +1101,32 @@ RUN_STATUS=success
 
 if ! $DRY_RUN; then
     mkdir -p "$LAST_RUN_DIR"
+    RUN_TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    REBOOT_FLAG=$([ "$REBOOT_DURING_RUN" = true ] && echo "yes" || echo "no")
     cat > "$LAST_RUN_FILE" << LAST
 VERSION=$SCRIPT_VERSION
 DISTRO=$DISTRO_NAME
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+TIMESTAMP=$RUN_TIMESTAMP
 STATUS=$RUN_STATUS
 FAILURES=$EXIT_CODE
 DISK_FREED_MB=$FREED_MB
-REBOOT_REQUIRED=$([ "$REBOOT_DURING_RUN" = true ] && echo "yes" || echo "no")
+REBOOT_REQUIRED=$REBOOT_FLAG
 LOG_FILE=$LOG_FILE
 LAST
+    if has_cmd jq; then
+        jq -n \
+            --arg v "$SCRIPT_VERSION" \
+            --arg d "$DISTRO_NAME" \
+            --arg t "$RUN_TIMESTAMP" \
+            --arg status "$RUN_STATUS" \
+            --argjson failures "$EXIT_CODE" \
+            --arg freed "$FREED_MB" \
+            --arg reboot "$REBOOT_FLAG" \
+            --arg log "$LOG_FILE" \
+            '{version:$v,distro:$d,timestamp:$t,status:$status,failures:$failures,disk_freed_mb:$freed,reboot_required:$reboot,log_file:$log}' \
+            >"$LAST_RUN_DIR/last-run.json" 2>/dev/null \
+            || warn "Failed to write $LAST_RUN_DIR/last-run.json"
+    fi
     info "Last run record written to $LAST_RUN_FILE"
 else
     info "DRY-RUN: Would write last-run record"
