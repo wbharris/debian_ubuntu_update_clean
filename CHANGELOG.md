@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.8] - 2026-06-22
+
+### Added
+- Named constants: `MIN_DISK_KB`, `MIN_LOG_DIR_KB`, `BOOT_MIN_KB`, `BOOT_LOW_KB`, `APT_UPDATE_MAX_RETRIES`
+- `apply_cli_config_overrides()` so explicit CLI flags win over config file values
+- Config file ownership UID validation before comparing to root
+
+### Changed
+- Config files load after CLI parsing; CLI overrides restored via `apply_cli_config_overrides()`
+- Disk usage uses `df -B 1K` consistently (removed `--output` fallback chain)
+- Kernel list queried once per run; passed to `find_running_kernel_pkg()` as cache
+- Kernel meta filter excludes dbg/virtual/cloud variants; keeps versioned images
+- Broader distro ID matching for Ubuntu derivatives (`*ubuntu*`, `debian*`, etc.)
+
 ## [1.4.7] - 2026-06-22
 
 ### Added

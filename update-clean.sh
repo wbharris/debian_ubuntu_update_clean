@@ -52,6 +52,21 @@ readonly SCRIPT_DIR
 EXIT_CODE=0
 KERNELS_REMOVED=false
 
+# Thresholds and retry limits (override via env if needed)
+readonly MIN_DISK_KB=${MIN_DISK_KB:-2097152}       # 2 GB
+readonly MIN_LOG_DIR_KB=${MIN_LOG_DIR_KB:-1024}    # 1 MB
+readonly BOOT_MIN_KB=${BOOT_MIN_KB:-10240}         # 10 MB — skip kernel removal
+readonly BOOT_LOW_KB=${BOOT_LOW_KB:-51200}         # 50 MB — low /boot warning
+readonly APT_UPDATE_MAX_RETRIES=${APT_UPDATE_MAX_RETRIES:-3}
+
+# CLI override markers (explicit flags win over config file)
+CLI_KERNEL_KEEP=""
+CLI_DRY_RUN=false
+CLI_SKIP_KERNEL=false
+CLI_SKIP_CONNECTIVITY=false
+CLI_REBOOT_IF_REQUIRED=false
+CLI_DEBUG=false
+
 # ────────────────────────────────────────────────────────────────
 # Colors (TTY-aware)
 # ────────────────────────────────────────────────────────────────
@@ -109,9 +124,9 @@ load_config_files() {
     for conf in "${confs[@]}"; do
         [ -f "$conf" ] || continue
         if [[ "$conf" == /etc/* ]]; then
-            owner=$(stat -c %u "$conf" 2>/dev/null || echo "")
-            if [ "$owner" != "0" ]; then
-                warn "Config $conf not owned by root; skipping"
+            owner=$(stat -c %u "$conf" 2>/dev/null || echo "invalid")
+            if ! [[ "$owner" =~ ^[0-9]+$ ]] || [ "$owner" != "0" ]; then
+                warn "Config $conf not owned by root (uid=$owner); skipping"
                 continue
             fi
         fi
@@ -123,8 +138,6 @@ load_config_files() {
         source "$conf"
     done
 }
-
-load_config_files
 
 validate_config_values() {
     if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
@@ -140,44 +153,36 @@ validate_config_values() {
     fi
 }
 
-validate_config_values
-require_cmds
-
-export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=none
+apply_cli_config_overrides() {
+    # Explicit CLI flags override values loaded from config files
+    [ -n "$CLI_KERNEL_KEEP" ] && KERNEL_KEEP="$CLI_KERNEL_KEEP"
+    $CLI_DRY_RUN && DRY_RUN=true
+    $CLI_SKIP_KERNEL && SKIP_KERNEL=true
+    $CLI_SKIP_CONNECTIVITY && SKIP_CONNECTIVITY=true
+    $CLI_REBOOT_IF_REQUIRED && REBOOT_IF_REQUIRED=true
+    $CLI_DEBUG && DEBUG=true
+}
 
 # ────────────────────────────────────────────────────────────────
 # Helpers
 # ────────────────────────────────────────────────────────────────
-df_supports_output() {
-    df --help 2>&1 | grep -q -- '--output'
-}
-
 get_avail_kb() {
     local part="$1"
     local val
 
-    if df_supports_output; then
-        val=$(df --output=avail "$part" 2>/dev/null | awk 'NR==2 {print $1+0}')
-    else
-        val=$(df -k "$part" 2>/dev/null | awk 'NR==2 {print $4+0}')
-    fi
+    val=$(df -B 1K "$part" 2>/dev/null | awk 'NR==2 {print $4+0}')
     printf '%d' "${val:-0}"
 }
 
 get_used_kb_for_paths() {
-    local sum=0
+    local sum
 
-    if df_supports_output; then
-        sum=$(df --output=used "$@" 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
-    else
-        sum=$(df -k "$@" 2>/dev/null | awk 'NR>1 {s+=$3} END {print s+0}')
-    fi
+    sum=$(df -B 1K "$@" 2>/dev/null | awk 'NR>1 {s+=$3} END {print s+0}')
     printf '%d' "${sum:-0}"
 }
 
 check_partition_space() {
-    local part="$1" min_kb="${2:-2097152}"
+    local part="$1" min_kb="${2:-$MIN_DISK_KB}"
     local avail_kb
 
     [ -d "$part" ] || return 0
@@ -205,7 +210,7 @@ warn_low_partition_space() {
 }
 
 report_partition_space() {
-    local part="$1" min_kb="${2:-2097152}"
+    local part="$1" min_kb="${2:-$MIN_DISK_KB}"
     local avail_kb
 
     [ -d "$part" ] || return 0
@@ -291,7 +296,8 @@ list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
         | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
         | grep -E '^linux-image(-unsigned)?-[0-9][0-9a-zA-Z.\-+]*' \
-        | grep -Ev 'linux-image.*(-meta|-rt|-amd64|-generic)(-hwe)?$' \
+        | grep -Ev -- '-(meta|dbg|dbgsym|rt|cloud|kvm|virtual)$' \
+        | grep -Ev 'linux-image-(generic|generic-hwe|amd64)(-lts|-hwe)?$' \
         | sort -V
 }
 
@@ -358,7 +364,7 @@ check_debian_based() {
     fi
 
     case "$DISTRO_ID" in
-        debian|ubuntu|kali|linuxmint|pop|elementary|zorin|kubuntu|xubuntu|lubuntu|mint)
+        debian*|ubuntu|kali*|linuxmint|pop|elementary|zorin|kubuntu|xubuntu|lubuntu|mint|*ubuntu*)
             return 0
             ;;
         *)
@@ -401,7 +407,9 @@ check_connectivity() {
 
 find_running_kernel_pkg() {
     local running_ver="$1"
+    shift
     local pkg vmlinuz
+    local -a candidates=("$@")
 
     [ -z "$running_ver" ] && return 1
 
@@ -414,13 +422,16 @@ find_running_kernel_pkg() {
         fi
     fi
 
-    while IFS= read -r pkg; do
-        [ -z "$pkg" ] && continue
+    if [ "${#candidates[@]}" -eq 0 ]; then
+        mapfile -t candidates < <(list_installed_kernel_images)
+    fi
+
+    for pkg in "${candidates[@]}"; do
         if [[ "$pkg" == *"$running_ver"* ]]; then
             printf '%s' "$pkg"
             return 0
         fi
-    done < <(list_installed_kernel_images)
+    done
 
     return 1
 }
@@ -474,7 +485,7 @@ apt_run() {
 }
 
 apt_get_update_with_retries() {
-    local attempt=0 max=3
+    local attempt=0
     local apt_log="${APT_LOG:-/dev/null}"
 
     while :; do
@@ -482,10 +493,10 @@ apt_get_update_with_retries() {
             return 0
         fi
         attempt=$((attempt + 1))
-        if [ "$attempt" -ge "$max" ]; then
+        if [ "$attempt" -ge "$APT_UPDATE_MAX_RETRIES" ]; then
             return 1
         fi
-        warn "apt-get update failed, retrying (attempt $((attempt + 1))/$max)..."
+        warn "apt-get update failed, retrying (attempt $((attempt + 1))/$APT_UPDATE_MAX_RETRIES)..."
         sleep $((attempt * 2))
     done
 }
@@ -493,18 +504,20 @@ apt_get_update_with_retries() {
 remove_old_kernels() {
     local -a kernels=()
     local -a to_remove=()
-    local running_pkg running_ver pkg i delcount boot_kb
+    local running_pkg running_ver pkg delcount boot_kb keep
 
     if [ -d /boot ]; then
         boot_kb=$(get_avail_kb /boot)
-        if [ "$boot_kb" -lt 10240 ]; then
-            warn "Skipping kernel removal: /boot has less than 10 MB free"
+        if [ "$boot_kb" -lt "$BOOT_MIN_KB" ]; then
+            warn "Skipping kernel removal: /boot has less than $((BOOT_MIN_KB / 1024)) MB free"
             return 0
         fi
     fi
 
+    mapfile -t kernels < <(list_installed_kernel_images)
+
     running_ver=$(uname -r 2>/dev/null || true)
-    running_pkg=$(find_running_kernel_pkg "$running_ver" || true)
+    running_pkg=$(find_running_kernel_pkg "$running_ver" "${kernels[@]}" || true)
 
     if [ -n "$running_pkg" ]; then
         info "Running kernel package: $running_pkg ($running_ver)"
@@ -512,8 +525,6 @@ remove_old_kernels() {
         warn "Could not match installed package for running kernel $running_ver; skipping kernel removal"
         return 0
     fi
-
-    mapfile -t kernels < <(list_installed_kernel_images)
 
     if [ "${#kernels[@]}" -eq 0 ]; then
         info "No linux-image packages found."
@@ -530,7 +541,7 @@ remove_old_kernels() {
         to_remove+=("$pkg")
     done
 
-    local keep="${KERNEL_KEEP:-2}"
+    keep="${KERNEL_KEEP:-2}"
 
     if [ "${#to_remove[@]}" -le "$keep" ]; then
         info "No old kernels to remove (keeping $keep beside running kernel)."
@@ -763,7 +774,7 @@ run_preflight_checks() {
     fi
 
     for part in / /var /boot; do
-        report_partition_space "$part" 2097152
+        report_partition_space "$part" "$MIN_DISK_KB"
     done
 
     printf 'APT lock free: '
@@ -802,10 +813,12 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)
             DRY_RUN=true
+            CLI_DRY_RUN=true
             shift
             ;;
         --no-kernel)
             SKIP_KERNEL=true
+            CLI_SKIP_KERNEL=true
             shift
             ;;
         --keep-kernels)
@@ -822,15 +835,18 @@ while [[ $# -gt 0 ]]; do
                 error "--keep-kernels cannot exceed $KERNEL_KEEP_MAX"
                 exit 1
             fi
+            CLI_KERNEL_KEEP="$1"
             KERNEL_KEEP="$1"
             shift
             ;;
         --reboot-if-required)
             REBOOT_IF_REQUIRED=true
+            CLI_REBOOT_IF_REQUIRED=true
             shift
             ;;
         --offline)
             SKIP_CONNECTIVITY=true
+            CLI_SKIP_CONNECTIVITY=true
             shift
             ;;
         --last|--status)
@@ -843,6 +859,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --debug)
             DEBUG=true
+            CLI_DEBUG=true
             shift
             ;;
         --help|-h)
@@ -861,7 +878,13 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+load_config_files
+apply_cli_config_overrides
 validate_config_values
+require_cmds
+
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
 
 detect_distro
 check_debian_based
@@ -891,7 +914,7 @@ if [ ! -w "$LOG_DIR" ]; then
     exit 1
 fi
 
-if [ "$(get_avail_kb "$LOG_DIR")" -lt 1024 ]; then
+if [ "$(get_avail_kb "$LOG_DIR")" -lt "$MIN_LOG_DIR_KB" ]; then
     printf '%s\n' "Insufficient space in $LOG_DIR for logs (< 1 MB free)" >&2
     exit 1
 fi
@@ -930,10 +953,10 @@ else
 fi
 
 for partition in "/" "/var" "/boot"; do
-    check_partition_space "$partition" 2097152 || exit 1
+    check_partition_space "$partition" "$MIN_DISK_KB" || exit 1
 done
 
-warn_low_partition_space "/boot" 51200
+warn_low_partition_space "/boot" "$BOOT_LOW_KB"
 
 if is_apt_locked; then
     warn "APT is locked by another process. Waiting up to 60s..."
