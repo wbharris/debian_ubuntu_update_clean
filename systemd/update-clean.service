@@ -1,0 +1,14 @@
+[Unit]
+Description=System update and cleanup (update-clean)
+Documentation=https://github.com/wbharris/debian_update_clean
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/update-clean.sh
+Nice=10
+IOSchedulingClass=best-effort
+
+[Install]
+WantedBy=multi-user.target
