@@ -16,4 +16,5 @@ jobs:
         uses: ludeeus/action-shellcheck@master
         with:
           scandir: '.'
-          severity: warning
+          severity: error
+          check_together: 'yes'

@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 # Debian / Ubuntu - Complete Update & Cleanup Script
 # Full system update + thorough cleanup for Debian-based systems
+#
+# Requirements: Bash 4+, run as root (sudo), apt-based system
+# Config: /etc/update-clean.conf, root or SUDO_USER home configs (see README)
+# Logs: /var/log/update-clean/ (retention via LOG_RETENTION)
+# Exit codes: 0 = success; 1 = one or more failures (count in FAILURES / EXIT_CODE)
+#
 # Usage: sudo ./update-clean.sh [--dry-run] [--no-kernel] [--help] [--version]
 # Recommended: run weekly
-# Configurable via env or /etc/update-clean.conf
 
 set -euo pipefail
 set -o errtrace
@@ -181,6 +186,16 @@ log_to_syslog() {
     fi
 }
 
+dump_debug_state() {
+    $DEBUG || return
+    printf 'DEBUG STATE:\n'
+    printf '  KERNEL_KEEP=%s SKIP_KERNEL=%s DRY_RUN=%s DEBUG=%s\n' \
+        "$KERNEL_KEEP" "$SKIP_KERNEL" "$DRY_RUN" "$DEBUG"
+    printf '  LOG_DIR=%s\n  LOG_FILE=%s\n  APT_LOG=%s\n' \
+        "$LOG_DIR" "$LOG_FILE" "$APT_LOG"
+    printf '  DISTRO=%s ARCHIVE_HOST=%s\n' "$DISTRO_NAME" "${ARCHIVE_HOST:-}"
+}
+
 format_cmd_args() {
     local -a args=("$@")
     local out="" arg
@@ -190,6 +205,8 @@ format_cmd_args() {
     printf '%s' "${out%" "}"
 }
 
+# is_apt_locked: returns 0 if an apt/dpkg lock is held, 1 if unlocked.
+# (Return 0 means "locked" — inverted from typical "success = free" wording.)
 is_apt_locked() {
     local locks=(
         /var/lib/dpkg/lock-frontend
@@ -228,7 +245,7 @@ is_apt_locked() {
 list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
         | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
-        | grep -E '^linux-image(-unsigned)?-[0-9]+' \
+        | grep -E '^linux-image(-unsigned)?-[0-9][0-9a-zA-Z.\-+]*' \
         | grep -Ev '(-meta|-rt|linux-image-amd64|linux-image-generic)$' \
         | sort -V
 }
@@ -245,7 +262,9 @@ create_etc_backup() {
     backup_file="/var/backups/etc-before-cleanup-$(date +%Y%m%d-%H%M%S).tar.gz"
     old_umask=$(umask)
     umask 077
-    if tar -czf "$backup_file" /etc/ 2>/dev/null; then
+    if tar --one-file-system \
+        --exclude='/etc/ssl/private' \
+        -czf "$backup_file" /etc/ 2>/dev/null; then
         chmod 600 "$backup_file"
         info "Backup saved to $backup_file"
     else
@@ -442,7 +461,7 @@ remove_old_kernels() {
         return 0
     fi
 
-    delcount=$(( ${#to_remove[@]} - KERNEL_KEEP ))
+    delcount=$(( ${#to_remove[@]} - $KERNEL_KEEP ))
     KERNELS_REMOVED=true
 
     info "Kernels scheduled for removal ($delcount):"
@@ -768,8 +787,6 @@ fi
 # Logging (with color stripping for file)
 # ────────────────────────────────────────────────────────────────
 LOG_DIR="/var/log/update-clean"
-LOG_FILE="$LOG_DIR/update-clean-$(date +%Y%m%d-%H%M%S).log"
-APT_LOG="$LOG_FILE.apt-warnings"
 
 if ! mkdir -p "$LOG_DIR"; then
     printf '%s\n' "Failed to create log directory $LOG_DIR" >&2
@@ -787,15 +804,15 @@ if [ "$(get_avail_kb "$LOG_DIR")" -lt 1024 ]; then
     exit 1
 fi
 
-if ! : >>"$LOG_FILE" 2>/dev/null; then
-    printf '%s\n' "Cannot write log file $LOG_FILE" >&2
-    exit 1
-fi
+LOG_FILE=$(mktemp --tmpdir="$LOG_DIR" "update-clean-$(date +%Y%m%d-%H%M%S)-XXXXXX.log") \
+    || { printf '%s\n' "Cannot create log file in $LOG_DIR" >&2; exit 1; }
+APT_LOG="${LOG_FILE}.apt-warnings"
 
 exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
 
 log "Running $SCRIPT_NAME version: $SCRIPT_VERSION on $DISTRO_NAME"
 log_to_syslog "Running $SCRIPT_NAME version: $SCRIPT_VERSION on $DISTRO_NAME"
+dump_debug_state
 
 log "Cleaning up old logs (keeping last $LOG_RETENTION)..."
 rotate_old_logs "${LOG_RETENTION:-0}"
@@ -931,6 +948,7 @@ else
         create_etc_backup || true
     fi
 
+    # '~c' is an apt/dpkg selection: packages in "rc" state (removed, config remains)
     info "Purging residual configuration files..."
     apt_run purge '~c' || warn "Purging residual configs had issues"
 fi

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.4] - 2026-06-22
+
+### Added
+- Header documentation for requirements, config paths, logs, and exit codes
+- `dump_debug_state()` when `--debug` is enabled
+- Comment documenting `is_apt_locked` return semantics and `~c` purge selection
+
+### Changed
+- Log files created atomically via `mktemp` in `LOG_DIR` (timestamp + random suffix)
+- Broader kernel package name regex (dots, dashes, `+` in version strings)
+- `/etc` backup excludes `/etc/ssl/private` and uses `--one-file-system`
+- ShellCheck CI fails on `error` severity
+
 ## [1.4.3] - 2026-06-22
 
 ### Added
