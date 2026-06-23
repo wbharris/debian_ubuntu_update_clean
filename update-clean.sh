@@ -31,6 +31,7 @@ DEBUG=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 KERNEL_KEEP=${KERNEL_KEEP:-2}
 BACKUP_MODE=${BACKUP_MODE:-false}
+REBOOT_IF_REQUIRED=${REBOOT_IF_REQUIRED:-false}
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 SCRIPT_NAME="update-clean"
 SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
@@ -100,15 +101,18 @@ load_config_files() {
 
 load_config_files
 
-if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
-    warn "Invalid LOG_RETENTION='$LOG_RETENTION', using default 3"
-    LOG_RETENTION=3
-fi
+validate_config_values() {
+    if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
+        warn "Invalid LOG_RETENTION='$LOG_RETENTION', using default 3"
+        LOG_RETENTION=3
+    fi
+    if ! [[ "$KERNEL_KEEP" =~ ^[0-9]+$ ]] || [ "$KERNEL_KEEP" -lt 0 ]; then
+        warn "Invalid KERNEL_KEEP='$KERNEL_KEEP', using default 2"
+        KERNEL_KEEP=2
+    fi
+}
 
-if ! [[ "$KERNEL_KEEP" =~ ^[0-9]+$ ]] || [ "$KERNEL_KEEP" -lt 1 ]; then
-    warn "Invalid KERNEL_KEEP='$KERNEL_KEEP', using default 2"
-    KERNEL_KEEP=2
-fi
+validate_config_values
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none
@@ -187,14 +191,69 @@ format_cmd_args() {
 }
 
 is_apt_locked() {
-    has_cmd fuser && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1
+    local locks=(
+        /var/lib/dpkg/lock-frontend
+        /var/lib/dpkg/lock
+        /var/lib/apt/lists/lock
+        /var/cache/apt/archives/lock
+    )
+    local lock
+
+    if has_cmd fuser; then
+        for lock in "${locks[@]}"; do
+            if [ -e "$lock" ] && fuser "$lock" >/dev/null 2>&1; then
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    if has_cmd lsof; then
+        for lock in "${locks[@]}"; do
+            if [ -e "$lock" ] && lsof "$lock" >/dev/null 2>&1; then
+                return 0
+            fi
+        done
+        return 1
+    fi
+
+    for lock in "${locks[@]}"; do
+        if [ -e "$lock" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 list_installed_kernel_images() {
-    dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-[0-9]*' 2>/dev/null \
+    dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
         | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
+        | grep -E '^linux-image(-unsigned)?-[0-9]+' \
         | grep -Ev '(-meta|-rt|linux-image-amd64|linux-image-generic)$' \
         | sort -V
+}
+
+create_etc_backup() {
+    local backup_file old_umask
+
+    info "BACKUP_MODE: Creating backup of /etc before purging configs"
+    if ! mkdir -p /var/backups; then
+        warn "Cannot create /var/backups"
+        return 1
+    fi
+
+    backup_file="/var/backups/etc-before-cleanup-$(date +%Y%m%d-%H%M%S).tar.gz"
+    old_umask=$(umask)
+    umask 077
+    if tar -czf "$backup_file" /etc/ 2>/dev/null; then
+        chmod 600 "$backup_file"
+        info "Backup saved to $backup_file"
+    else
+        warn "Backup of /etc failed"
+        umask "$old_umask"
+        return 1
+    fi
+    umask "$old_umask"
 }
 
 detect_distro() {
@@ -386,6 +445,11 @@ remove_old_kernels() {
     delcount=$(( ${#to_remove[@]} - KERNEL_KEEP ))
     KERNELS_REMOVED=true
 
+    info "Kernels scheduled for removal ($delcount):"
+    for ((i = 0; i < delcount; i++)); do
+        info "  ${to_remove[i]}"
+    done
+
     for ((i = 0; i < delcount; i++)); do
         pkg="${to_remove[i]}"
         if $DRY_RUN; then
@@ -521,6 +585,7 @@ Options:
   --dry-run         Simulate actions without making changes
   --no-kernel       Skip old kernel removal
   --keep-kernels N  Keep N kernels besides running (default: 2)
+  --reboot-if-required  Reboot automatically when required
   --last, --status  Show information from the last run
   --check, --doctor Run pre-flight checks only (no updates)
   --debug           Enable shell trace (set -x) for troubleshooting
@@ -531,6 +596,7 @@ Environment / Config:
   LOG_RETENTION     Number of logs to keep (default: 3)
   KERNEL_KEEP       Kernels to keep besides running (default: 2)
   BACKUP_MODE       Backup /etc before purging configs (default: false)
+  REBOOT_IF_REQUIRED Reboot automatically if required (default: false)
   ADMIN_EMAIL       Optional email address for completion notification
   CRITICAL_PACKAGES Array of packages to hold during cleanup
 USAGE
@@ -644,7 +710,15 @@ while [[ $# -gt 0 ]]; do
                 error "--keep-kernels requires a number"
                 exit 1
             fi
+            if ! [[ "$1" =~ ^[0-9]+$ ]]; then
+                error "--keep-kernels requires a numeric value"
+                exit 1
+            fi
             KERNEL_KEEP="$1"
+            shift
+            ;;
+        --reboot-if-required)
+            REBOOT_IF_REQUIRED=true
             shift
             ;;
         --last|--status)
@@ -675,6 +749,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+validate_config_values
+
 detect_distro
 check_debian_based
 
@@ -695,8 +771,26 @@ LOG_DIR="/var/log/update-clean"
 LOG_FILE="$LOG_DIR/update-clean-$(date +%Y%m%d-%H%M%S).log"
 APT_LOG="$LOG_FILE.apt-warnings"
 
-mkdir -p "$LOG_DIR"
+if ! mkdir -p "$LOG_DIR"; then
+    printf '%s\n' "Failed to create log directory $LOG_DIR" >&2
+    exit 1
+fi
 chmod 755 "$LOG_DIR"
+
+if [ ! -w "$LOG_DIR" ]; then
+    printf '%s\n' "Log directory $LOG_DIR is not writable" >&2
+    exit 1
+fi
+
+if [ "$(get_avail_kb "$LOG_DIR")" -lt 1024 ]; then
+    printf '%s\n' "Insufficient space in $LOG_DIR for logs (< 1 MB free)" >&2
+    exit 1
+fi
+
+if ! : >>"$LOG_FILE" 2>/dev/null; then
+    printf '%s\n' "Cannot write log file $LOG_FILE" >&2
+    exit 1
+fi
 
 exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
 
@@ -761,7 +855,9 @@ if ! flock -n 200; then
 fi
 
 cleanup() {
-    local rc=$?
+    trap - INT TERM EXIT ERR
+
+    local rc=${1:-$?}
     flock -u 200 2>/dev/null || true
     exec 200>&- 2>/dev/null || true
     rm -f "$LOCKFILE" 2>/dev/null || true
@@ -771,7 +867,7 @@ cleanup() {
     exit "$rc"
 }
 
-trap cleanup INT TERM EXIT
+trap 'cleanup $?' INT TERM EXIT
 trap '_record_failure; error "Unhandled error on line $LINENO in ${FUNCNAME[0]:-main}"' ERR
 
 # ────────────────────────────────────────────────────────────────
@@ -832,10 +928,7 @@ else
     apt-get clean 2>&1 | tee -a "${APT_LOG:-/dev/null}" || _record_failure
 
     if [ "${BACKUP_MODE}" = true ]; then
-        info "BACKUP_MODE: Creating backup of /etc before purging configs"
-        mkdir -p /var/backups
-        tar -czf "/var/backups/etc-before-cleanup-$(date +%Y%m%d-%H%M%S).tar.gz" /etc/ 2>/dev/null \
-            || warn "Backup of /etc failed"
+        create_etc_backup || true
     fi
 
     info "Purging residual configuration files..."
@@ -928,7 +1021,13 @@ fi
 
 if [ "$REBOOT_DURING_RUN" = true ]; then
     warn "Reboot is required to complete some updates."
-    warn "Run: sudo reboot"
+    if [ "${REBOOT_IF_REQUIRED}" = true ] && ! $DRY_RUN; then
+        info "REBOOT_IF_REQUIRED set; rebooting now"
+        log_to_syslog "Rebooting after $SCRIPT_NAME run"
+        reboot
+    else
+        warn "Run: sudo reboot (or use --reboot-if-required)"
+    fi
 else
     success "No reboot required from this run."
 fi

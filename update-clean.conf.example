@@ -13,6 +13,9 @@
 # Backup /etc before purging residual configs (default: false)
 # BACKUP_MODE=true
 
+# Reboot automatically when /var/run/reboot-required is set (default: false)
+# REBOOT_IF_REQUIRED=true
+
 # Optional completion email (requires mail command)
 # ADMIN_EMAIL=admin@example.com
 

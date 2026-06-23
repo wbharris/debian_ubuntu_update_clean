@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.3] - 2026-06-22
+
+### Added
+- `validate_config_values()` re-run after CLI parsing
+- `--reboot-if-required` flag and `REBOOT_IF_REQUIRED` config option
+- `create_etc_backup()` with restrictive umask and `chmod 600` archives
+- Kernel removal preview list before purging
+
+### Changed
+- `cleanup()` clears traps first to prevent EXIT trap recursion
+- `is_apt_locked()` checks all common apt/dpkg lock files (fuser/lsof fallback)
+- `list_installed_kernel_images()` includes `linux-image-unsigned` variants
+- Log directory validated for writability and minimum free space before `exec`
+- `--keep-kernels` rejects non-numeric values at parse time
+
+### Fixed
+- `KERNEL_KEEP` from `--keep-kernels` could bypass post-config validation
+
 ## [1.4.2] - 2026-06-22
 
 ### Added

@@ -51,6 +51,7 @@ Options:
 sudo ./update-clean.sh --dry-run
 sudo ./update-clean.sh --no-kernel
 sudo ./update-clean.sh --keep-kernels 3
+sudo ./update-clean.sh --reboot-if-required
 sudo ./update-clean.sh --check
 sudo ./update-clean.sh --last
 sudo ./update-clean.sh --debug
