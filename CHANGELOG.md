@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented here.
 
+## [1.2.0] - 2026-06-23
+
+### Added
+- Bash 4+ version check and `umask 022`
+- `get_avail_kb()` for robust disk-space parsing
+- `EXIT_CODE` / `_record_failure()` tracking with `FAILURES` in last-run record
+- `wget` fallback in connectivity checks
+- `check_systemd_resolved()` guard before `systemctl` calls
+- ERR trap for unhandled errors
+
+### Changed
+- `apt_run()` uses `apt-get` with `--force-confdef` / `--force-confold`
+- `remove_old_kernels()` excludes running kernel and meta packages; keeps 2 newest
+- Last-run `STATUS` reflects success or failure instead of always `success`
+- Logging uses `printf` instead of `echo -e`
+- Script exits non-zero when failures were recorded
+
+### Fixed
+- Cleanup trap releases flock and preserves exit code reliably
+
+## [1.1.1] - 2026-06-23
+
+### Changed
+- Renamed repository to `debian_ubuntu_update_clean` (consolidated from separate Debian/Ubuntu repos)
+
 ## [1.1.0] - 2026-06-23
 
 ### Added

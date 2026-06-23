@@ -8,6 +8,14 @@
 set -euo pipefail
 set -o errtrace
 
+# Require Bash 4+ (mapfile, array sorting)
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    printf '%s\n' "This script requires Bash 4+. Found: ${BASH_VERSION:-unknown}" >&2
+    exit 1
+fi
+
+umask 022
+
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # ────────────────────────────────────────────────────────────────
@@ -18,6 +26,8 @@ SKIP_KERNEL=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 SCRIPT_NAME="update-clean"
 SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
+EXIT_CODE=0
+KERNELS_REMOVED=false
 
 # Load config file if present
 for conf in /etc/update-clean.conf "$HOME/.config/update-clean.conf" "$HOME/.update-clean.conf"; do
@@ -41,11 +51,13 @@ else
     NC=''
 fi
 
-log()      { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
-info()     { echo -e "${BLUE}[INFO]${NC} $1"; }
-success()  { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-warn()     { echo -e "${YELLOW}[WARNING]${NC} $1"; }
-error()    { echo -e "${RED}[ERROR]${NC} $1"; }
+log()     { printf '%b\n' "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
+info()    { printf '%b\n' "${BLUE}[INFO]${NC} $1"; }
+success() { printf '%b\n' "${GREEN}[SUCCESS]${NC} $1"; }
+warn()    { printf '%b\n' "${YELLOW}[WARNING]${NC} $1"; }
+error()   { printf '%b\n' "${RED}[ERROR]${NC} $1"; }
+
+_record_failure() { EXIT_CODE=$((EXIT_CODE + 1)); }
 
 if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
     warn "Invalid LOG_RETENTION='$LOG_RETENTION', using default 3"
@@ -53,8 +65,15 @@ if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────
-# Distro detection
+# Helpers
 # ────────────────────────────────────────────────────────────────
+get_avail_kb() {
+    local part="$1"
+    local val
+    val=$(df --output=avail "$part" 2>/dev/null | awk 'NR==2 {print $1+0}')
+    printf '%d' "${val:-0}"
+}
+
 detect_distro() {
     if [ -f /etc/os-release ]; then
         # shellcheck source=/dev/null
@@ -104,6 +123,10 @@ check_connectivity() {
         if curl -sSf --connect-timeout 5 "https://${host}/" >/dev/null 2>&1; then
             return 0
         fi
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q --timeout=5 --spider "https://${host}/" >/dev/null 2>&1; then
+            return 0
+        fi
     fi
 
     if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
@@ -115,30 +138,65 @@ check_connectivity() {
 }
 
 apt_run() {
+    local args=("$@")
+
     if $DRY_RUN; then
-        info "DRY-RUN: apt $*"
-        apt -s "$@" 2>&1 | tee -a "$APT_LOG" || true
-    else
-        DEBIAN_FRONTEND=noninteractive apt-get -y "$@" 2>&1 | tee -a "$APT_LOG"
+        info "DRY-RUN: apt-get ${args[*]}"
+        apt-get -s "${args[@]}" 2>&1 | tee -a "$APT_LOG" || true
+        return 0
+    fi
+
+    local cmd=(
+        apt-get
+        -o Dpkg::Options::="--force-confdef"
+        -o Dpkg::Options::="--force-confold"
+        -y
+    )
+    cmd+=("${args[@]}")
+
+    if ! DEBIAN_FRONTEND=noninteractive "${cmd[@]}" 2>&1 | tee -a "$APT_LOG"; then
+        _record_failure
+        return 1
     fi
 }
 
 remove_old_kernels() {
     local -a kernels=()
-    local delcount pkg i
+    local -a to_remove=()
+    local keep=2
+    local running_pkg running_ver pkg i delcount
 
-    mapfile -t kernels < <(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null | sort -V)
+    running_ver=$(uname -r 2>/dev/null || true)
+    running_pkg=$(dpkg-query -W -f='${Package}\n' "linux-image-${running_ver}" 2>/dev/null || true)
 
-    if [ "${#kernels[@]}" -le 2 ]; then
-        info "No old kernels to remove."
-        return 1
+    mapfile -t kernels < <(
+        dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null \
+            | grep -Ev '(-meta|-rt|linux-image-amd64|linux-image-generic)$' \
+            | sort -V
+    )
+
+    if [ "${#kernels[@]}" -eq 0 ]; then
+        info "No linux-image packages found."
+        return 0
     fi
 
-    delcount=$(( ${#kernels[@]} - 2 ))
+    for pkg in "${kernels[@]}"; do
+        if [ -n "$running_pkg" ] && [ "$pkg" = "$running_pkg" ]; then
+            continue
+        fi
+        to_remove+=("$pkg")
+    done
+
+    if [ "${#to_remove[@]}" -le "$keep" ]; then
+        info "No old kernels to remove."
+        return 0
+    fi
+
+    delcount=$(( ${#to_remove[@]} - keep ))
     KERNELS_REMOVED=true
 
     for ((i = 0; i < delcount; i++)); do
-        pkg="${kernels[i]}"
+        pkg="${to_remove[i]}"
         if $DRY_RUN; then
             info "DRY-RUN: Would purge old kernel: $pkg"
             continue
@@ -154,7 +212,7 @@ show_dry_run_preview() {
     info "DRY-RUN preview: upgradable packages"
     apt list --upgradable 2>/dev/null | sed -n '1,40p' || true
     info "DRY-RUN preview: autoremove simulation"
-    apt -s autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
+    apt-get -s autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
 }
 
 hold_critical_packages() {
@@ -165,6 +223,23 @@ hold_critical_packages() {
     else
         apt-mark hold base-files base-passwd bash coreutils util-linux 2>/dev/null || true
     fi
+}
+
+safe_run() {
+    local desc="$1"
+    shift
+    info "$desc"
+    if ! "$@"; then
+        warn "$desc failed — continuing"
+        _record_failure
+    fi
+}
+
+check_systemd_resolved() {
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+        return 0
+    fi
+    return 1
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -189,19 +264,18 @@ USAGE
 
 show_version() {
     detect_distro
-    echo "$SCRIPT_NAME $SCRIPT_VERSION"
-    echo "Distro: $DISTRO_NAME"
+    printf '%s %s\n' "$SCRIPT_NAME" "$SCRIPT_VERSION"
+    printf 'Distro: %s\n' "$DISTRO_NAME"
 
     if [ -d "$SCRIPT_DIR/.git" ]; then
         local commit
         commit=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-        echo "Commit: $commit"
+        printf 'Commit: %s\n' "$commit"
     fi
 
     local last_file="/var/lib/update-clean/last-run"
     if [ -f "$last_file" ]; then
-        echo ""
-        echo "Last run:"
+        printf '\nLast run:\n'
         sed 's/^/  /' "$last_file"
     fi
 }
@@ -209,62 +283,62 @@ show_version() {
 show_last_run() {
     local last_file="/var/lib/update-clean/last-run"
     if [ -f "$last_file" ]; then
-        echo "Last run information:"
+        printf '%s\n' "Last run information:"
         cat "$last_file"
     else
-        echo "No last-run record found."
+        printf '%s\n' "No last-run record found."
     fi
 }
 
 run_preflight_checks() {
+    local avail_kb
     detect_distro
     check_debian_based
 
-    echo "=== Pre-flight Checks ==="
-    echo "Distro: $DISTRO_NAME"
+    printf '%s\n' "=== Pre-flight Checks ==="
+    printf 'Distro: %s\n' "$DISTRO_NAME"
 
-    echo -n "Running as root: "
-    if [ "$EUID" -eq 0 ]; then echo "OK"; else echo "FAIL (must be root)"; fi
+    printf 'Running as root: '
+    if [ "$EUID" -eq 0 ]; then printf '%s\n' "OK"; else printf '%s\n' "FAIL (must be root)"; fi
 
-    echo -n "Internet"
+    printf 'Internet'
     if [ -n "$ARCHIVE_HOST" ]; then
-        echo -n " ($ARCHIVE_HOST)"
+        printf ' (%s)' "$ARCHIVE_HOST"
     fi
-    echo -n ": "
+    printf ': '
     if check_connectivity; then
-        echo "OK"
+        printf '%s\n' "OK"
     else
-        echo "FAIL"
+        printf '%s\n' "FAIL"
     fi
 
     for part in / /var /boot; do
         if [ -d "$part" ]; then
-            local avail
-            avail=$(df "$part" --output=avail | tail -n 1)
-            echo -n "Disk space on $part: "
-            if [ "$avail" -ge 2097152 ]; then
-                echo "OK ($(($avail / 1024)) MB free)"
+            avail_kb=$(get_avail_kb "$part")
+            printf 'Disk space on %s: ' "$part"
+            if [ "$avail_kb" -ge 2097152 ]; then
+                printf 'OK (%s MB free)\n' "$((avail_kb / 1024))"
             else
-                echo "LOW ($(($avail / 1024)) MB free)"
+                printf 'LOW (%s MB free)\n' "$((avail_kb / 1024))"
             fi
         fi
     done
 
-    echo -n "APT lock free: "
+    printf 'APT lock free: '
     if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-        echo "OK"
+        printf '%s\n' "OK"
     else
-        echo "LOCKED"
+        printf '%s\n' "LOCKED"
     fi
 
-    echo -n "systemd-resolved active: "
-    if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
-        echo "OK"
+    printf 'systemd-resolved active: '
+    if check_systemd_resolved; then
+        printf '%s\n' "OK"
     else
-        echo "INACTIVE"
+        printf '%s\n' "INACTIVE or systemctl not available"
     fi
 
-    echo -n "Required tools: "
+    printf 'Required tools: '
     local missing=""
     for tool in apt dpkg; do
         if ! command -v "$tool" >/dev/null 2>&1; then
@@ -272,12 +346,12 @@ run_preflight_checks() {
         fi
     done
     if [ -z "$missing" ]; then
-        echo "OK"
+        printf '%s\n' "OK"
     else
-        echo "MISSING:$missing"
+        printf 'MISSING:%s\n' "$missing"
     fi
 
-    echo "=== Checks complete ==="
+    printf '%s\n' "=== Checks complete ==="
 }
 
 while [[ $# -gt 0 ]]; do
@@ -364,7 +438,7 @@ fi
 
 for partition in "/" "/var" "/boot"; do
     if [ -d "$partition" ]; then
-        avail_kb=$(df "$partition" --output=avail | tail -n 1)
+        avail_kb=$(get_avail_kb "$partition")
         if [ "$avail_kb" -lt 2097152 ]; then
             error "Less than 2 GB free on $partition"
             exit 1
@@ -373,7 +447,7 @@ for partition in "/" "/var" "/boot"; do
 done
 
 if [ -d /boot ]; then
-    boot_kb=$(df /boot --output=avail | tail -n 1)
+    boot_kb=$(get_avail_kb /boot)
     if [ "$boot_kb" -lt 51200 ]; then
         warn "Very low space on /boot (< 50 MB). Kernel updates may fail."
     fi
@@ -393,11 +467,11 @@ if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
     fi
 fi
 
-if ! systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+if ! check_systemd_resolved; then
     warn "systemd-resolved is not active. DNS resolution may be affected."
 fi
 
-BEFORE=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s}')
+BEFORE=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
 
 # ────────────────────────────────────────────────────────────────
 # File lock + trap
@@ -408,38 +482,49 @@ if ! flock -n 200; then
     error "Another instance of $SCRIPT_NAME is already running."
     exit 1
 fi
-trap 'rc=$?; flock -u 200; exec 200>&-; rm -f "$LOCKFILE"; exit $rc' INT TERM EXIT
 
-safe_run() {
-    local desc="$1"
-    shift
-    info "$desc"
-    if ! "$@"; then
-        warn "$desc failed — continuing"
+cleanup() {
+    local rc=$?
+    flock -u 200 2>/dev/null || true
+    exec 200>&- 2>/dev/null || true
+    rm -f "$LOCKFILE" 2>/dev/null || true
+    if [ "$rc" -ne 0 ]; then
+        error "Script exited with status $rc"
     fi
+    exit "$rc"
 }
 
-KERNELS_REMOVED=false
+trap cleanup INT TERM EXIT
+trap '_record_failure; error "Unhandled error on line $LINENO"' ERR
 
 # ────────────────────────────────────────────────────────────────
 # Core update
 # ────────────────────────────────────────────────────────────────
 info "Configuring any interrupted package installations..."
-dpkg --configure -a || warn "dpkg --configure -a had issues"
+if ! dpkg --configure -a; then
+    warn "dpkg --configure -a had issues"
+    _record_failure
+fi
 
 info "Fixing broken dependencies..."
 apt_run install -f || warn "apt install -f had issues"
 
 info "Updating package lists..."
 if $DRY_RUN; then
-    info "DRY-RUN: apt update"
-    apt -s update 2>&1 | tee -a "$APT_LOG" || true
+    info "DRY-RUN: apt-get update"
+    apt-get -s update 2>&1 | tee -a "$APT_LOG" || true
 else
-    apt-get update 2>&1 | tee -a "$APT_LOG"
+    if ! apt-get update 2>&1 | tee -a "$APT_LOG"; then
+        warn "apt-get update had issues"
+        _record_failure
+    fi
 fi
 
 info "Checking package cache integrity (apt-get check)..."
-apt-get check || warn "Package cache check reported issues"
+if ! apt-get check; then
+    warn "Package cache check reported issues"
+    _record_failure
+fi
 
 info "Upgrading packages..."
 apt_run upgrade || warn "apt upgrade had issues"
@@ -462,14 +547,14 @@ hold_critical_packages
 
 if $DRY_RUN; then
     info "DRY-RUN: Would run autoremove, clean, purge configs, kernel removal, etc."
-    apt -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
+    apt-get -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
 else
     info "Removing unnecessary packages (autoremove --purge)..."
     apt_run --purge autoremove || warn "autoremove had issues"
 
     info "Cleaning package cache (autoclean + clean)..."
-    apt-get autoclean 2>&1 | tee -a "$APT_LOG"
-    apt-get clean 2>&1 | tee -a "$APT_LOG"
+    apt-get autoclean 2>&1 | tee -a "$APT_LOG" || _record_failure
+    apt-get clean 2>&1 | tee -a "$APT_LOG" || _record_failure
 
     info "Purging residual configuration files..."
     apt_run purge '~c' || warn "Purging residual configs had issues"
@@ -479,7 +564,7 @@ if $SKIP_KERNEL; then
     info "Skipping old kernel removal (--no-kernel)."
 else
     info "Removing old kernels (keeping current + previous)..."
-    remove_old_kernels || true
+    remove_old_kernels
 fi
 
 if $KERNELS_REMOVED && command -v update-grub >/dev/null 2>&1 && ! $DRY_RUN; then
@@ -542,7 +627,7 @@ fi
 # ────────────────────────────────────────────────────────────────
 # Final status & summary
 # ────────────────────────────────────────────────────────────────
-AFTER=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s}')
+AFTER=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
 FREED_KB=$(( BEFORE - AFTER ))
 FREED_MB=$(awk "BEGIN {printf \"%.2f\", $FREED_KB / 1024 }")
 
@@ -562,6 +647,8 @@ fi
 
 LAST_RUN_DIR="/var/lib/update-clean"
 LAST_RUN_FILE="$LAST_RUN_DIR/last-run"
+RUN_STATUS=success
+[ "$EXIT_CODE" -ne 0 ] && RUN_STATUS=failure
 
 if ! $DRY_RUN; then
     mkdir -p "$LAST_RUN_DIR"
@@ -569,7 +656,8 @@ if ! $DRY_RUN; then
 VERSION=$SCRIPT_VERSION
 DISTRO=$DISTRO_NAME
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-STATUS=success
+STATUS=$RUN_STATUS
+FAILURES=$EXIT_CODE
 DISK_FREED_MB=$FREED_MB
 REBOOT_REQUIRED=$([ "$REBOOT_DURING_RUN" = true ] && echo "yes" || echo "no")
 LOG_FILE=$LOG_FILE
@@ -591,13 +679,23 @@ if command -v notify-send >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
     if [ "$REBOOT_DURING_RUN" = true ]; then
         MSG="$MSG Reboot recommended."
     fi
+    if [ "$EXIT_CODE" -ne 0 ]; then
+        MSG="$MSG Some steps reported failures."
+    fi
     notify-send "Update & Cleanup" "$MSG" 2>/dev/null || true
 fi
 
-success "Update and cleanup completed successfully!"
 log "=== Update Summary ==="
 log "Distro: $DISTRO_NAME"
 log "Disk space freed (/, /var, /boot): ${FREED_MB} MB"
+log "Failures recorded: $EXIT_CODE"
 log "Full log saved to: $LOG_FILE"
 log "APT warnings logged to: $APT_LOG"
-exit 0
+
+if [ "$EXIT_CODE" -eq 0 ]; then
+    success "Update and cleanup completed successfully!"
+    exit 0
+else
+    warn "Update and cleanup finished with $EXIT_CODE failure(s)."
+    exit 1
+fi

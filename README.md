@@ -1,4 +1,4 @@
-# debian_update_clean
+# debian_ubuntu_update_clean
 
 One clean update and cleanup script for **Debian** and **Ubuntu** (and other apt-based derivatives).
 
@@ -74,7 +74,7 @@ LOG_RETENTION=5
 
 - Detailed logs: `/var/log/update-clean/`
 - Only the most recent 3 logs are kept automatically
-- Last run record: `/var/lib/update-clean/last-run`
+- Last run record: `/var/lib/update-clean/last-run` (includes `STATUS` and `FAILURES`)
 
 ### Safety
 
@@ -91,7 +91,13 @@ LOG_RETENTION=5
 0 4 * * 0 /path/to/update-clean.sh
 ```
 
-Or use a systemd timer for more control.
+Or use the included systemd timer:
+
+```bash
+sudo cp systemd/update-clean.service systemd/update-clean.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now update-clean.timer
+```
 
 ### Supported systems
 

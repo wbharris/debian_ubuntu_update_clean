@@ -6,3 +6,6 @@
 
 # Number of log files to retain (default: 3)
 # LOG_RETENTION=5
+
+# Kernel removal keeps the running kernel plus one previous version.
+# Use --no-kernel on the command line to skip kernel cleanup entirely.

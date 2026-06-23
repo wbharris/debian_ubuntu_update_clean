@@ -1,6 +1,6 @@
 [Unit]
 Description=System update and cleanup (update-clean)
-Documentation=https://github.com/wbharris/debian_update_clean
+Documentation=https://github.com/wbharris/debian_ubuntu_update_clean
 After=network-online.target
 Wants=network-online.target
 
