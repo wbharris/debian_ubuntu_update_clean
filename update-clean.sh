@@ -27,6 +27,7 @@ fi
 # ────────────────────────────────────────────────────────────────
 DRY_RUN=false
 SKIP_KERNEL=false
+DEBUG=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 KERNEL_KEEP=${KERNEL_KEEP:-2}
 BACKUP_MODE=${BACKUP_MODE:-false}
@@ -61,9 +62,25 @@ error()   { printf '%b\n' "${RED}[ERROR]${NC} $1"; }
 
 _record_failure() { EXIT_CODE=$((EXIT_CODE + 1)); }
 
+has_cmd() { command -v "$1" >/dev/null 2>&1; }
+
 load_config_files() {
     local conf owner
-    for conf in /etc/update-clean.conf "$HOME/.config/update-clean.conf" "$HOME/.update-clean.conf"; do
+    local -a confs=(/etc/update-clean.conf)
+
+    if [ "$EUID" -eq 0 ]; then
+        confs+=("/root/.config/update-clean.conf" "/root/.update-clean.conf")
+        if [ -n "${SUDO_USER:-}" ] && [ -d "/home/$SUDO_USER" ]; then
+            confs+=(
+                "/home/$SUDO_USER/.config/update-clean.conf"
+                "/home/$SUDO_USER/.update-clean.conf"
+            )
+        fi
+    else
+        confs+=("$HOME/.config/update-clean.conf" "$HOME/.update-clean.conf")
+    fi
+
+    for conf in "${confs[@]}"; do
         [ -f "$conf" ] || continue
         if [[ "$conf" == /etc/* ]]; then
             owner=$(stat -c %u "$conf" 2>/dev/null || echo "")
@@ -71,6 +88,10 @@ load_config_files() {
                 warn "Config $conf not owned by root; skipping"
                 continue
             fi
+        fi
+        if [ ! -r "$conf" ]; then
+            warn "Config $conf is not readable; skipping"
+            continue
         fi
         # shellcheck source=/dev/null
         source "$conf"
@@ -88,6 +109,9 @@ if ! [[ "$KERNEL_KEEP" =~ ^[0-9]+$ ]] || [ "$KERNEL_KEEP" -lt 1 ]; then
     warn "Invalid KERNEL_KEEP='$KERNEL_KEEP', using default 2"
     KERNEL_KEEP=2
 fi
+
+export DEBIAN_FRONTEND=noninteractive
+export APT_LISTCHANGES_FRONTEND=none
 
 # ────────────────────────────────────────────────────────────────
 # Helpers
@@ -148,9 +172,29 @@ calc_disk_freed_mb() {
 }
 
 log_to_syslog() {
-    if command -v logger >/dev/null 2>&1; then
+    if has_cmd logger; then
         logger -t "$SCRIPT_NAME" -p user.info -- "$1"
     fi
+}
+
+format_cmd_args() {
+    local -a args=("$@")
+    local out="" arg
+    for arg in "${args[@]}"; do
+        out+="$(printf '%q' "$arg") "
+    done
+    printf '%s' "${out%" "}"
+}
+
+is_apt_locked() {
+    has_cmd fuser && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1
+}
+
+list_installed_kernel_images() {
+    dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-[0-9]*' 2>/dev/null \
+        | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
+        | grep -Ev '(-meta|-rt|linux-image-amd64|linux-image-generic)$' \
+        | sort -V
 }
 
 detect_distro() {
@@ -201,29 +245,30 @@ check_debian_based() {
 check_connectivity() {
     local host="${ARCHIVE_HOST:-deb.debian.org}"
 
-    if command -v curl >/dev/null 2>&1; then
+    if has_cmd curl; then
         if curl -sSf --connect-timeout 5 "https://${host}/" >/dev/null 2>&1; then
             return 0
         fi
-    elif command -v wget >/dev/null 2>&1; then
+    elif has_cmd wget; then
         if wget -q --timeout=5 --spider "https://${host}/" >/dev/null 2>&1; then
             return 0
         fi
     fi
 
-    if command -v getent >/dev/null 2>&1 && getent hosts "$host" >/dev/null 2>&1; then
+    if has_cmd getent && getent hosts "$host" >/dev/null 2>&1; then
         warn "HTTPS check failed but DNS resolves for $host; proceeding."
         return 0
     fi
 
-    if ping -c 1 -W 3 "$host" >/dev/null 2>&1; then
-        warn "Could not reach https://${host} but host responds to ping; proceeding."
-        return 0
-    fi
-
-    if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-        warn "Could not reach $host but internet ping (8.8.8.8) succeeded; proceeding."
-        return 0
+    if has_cmd ping; then
+        if ping -c 1 -W 3 "$host" >/dev/null 2>&1; then
+            warn "Could not reach https://${host} but host responds to ping; proceeding."
+            return 0
+        fi
+        if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+            warn "Could not reach $host but internet ping (8.8.8.8) succeeded; proceeding."
+            return 0
+        fi
     fi
 
     return 1
@@ -231,16 +276,26 @@ check_connectivity() {
 
 find_running_kernel_pkg() {
     local running_ver="$1"
-    local kp
+    local pkg vmlinuz
 
     [ -z "$running_ver" ] && return 1
 
-    for kp in $(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null | sort -V); do
-        if [[ "$kp" == *"$running_ver"* ]]; then
-            printf '%s' "$kp"
+    vmlinuz="/boot/vmlinuz-${running_ver}"
+    if [ -f "$vmlinuz" ]; then
+        pkg=$(dpkg-query -S "$vmlinuz" 2>/dev/null | awk -F: '{print $1}' | head -n1)
+        if [ -n "$pkg" ]; then
+            printf '%s' "$pkg"
             return 0
         fi
-    done
+    fi
+
+    while IFS= read -r pkg; do
+        [ -z "$pkg" ] && continue
+        if [[ "$pkg" == *"$running_ver"* ]]; then
+            printf '%s' "$pkg"
+            return 0
+        fi
+    done < <(list_installed_kernel_images)
 
     return 1
 }
@@ -270,9 +325,10 @@ purge_kernel_related() {
 
 apt_run() {
     local -a args=("$@")
+    local apt_log="${APT_LOG:-/dev/null}"
 
     if $DRY_RUN; then
-        info "DRY-RUN: would run: apt-get -y ${args[*]}"
+        info "DRY-RUN: would run: apt-get -y $(format_cmd_args "${args[@]}")"
         return 0
     fi
 
@@ -284,7 +340,7 @@ apt_run() {
         "${args[@]}"
     )
 
-    if ! DEBIAN_FRONTEND=noninteractive "${cmd[@]}" 2>&1 | tee -a "$APT_LOG"; then
+    if ! DEBIAN_FRONTEND=noninteractive "${cmd[@]}" 2>&1 | tee -a "$apt_log"; then
         _record_failure
         return 1
     fi
@@ -305,11 +361,7 @@ remove_old_kernels() {
         return 0
     fi
 
-    mapfile -t kernels < <(
-        dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null \
-            | grep -Ev '(-meta|-rt|linux-image-amd64|linux-image-generic)$' \
-            | sort -V
-    )
+    mapfile -t kernels < <(list_installed_kernel_images)
 
     if [ "${#kernels[@]}" -eq 0 ]; then
         info "No linux-image packages found."
@@ -347,22 +399,37 @@ remove_old_kernels() {
 }
 
 show_dry_run_preview() {
+    local apt_log="${APT_LOG:-/dev/null}"
+
     info "DRY-RUN preview: upgradable packages (read-only)"
     apt list --upgradable 2>/dev/null | sed -n '1,40p' || true
     info "DRY-RUN preview: autoremove simulation (read-only)"
-    apt-get -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
+    apt-get -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$apt_log" || true
 }
 
 rotate_old_logs() {
-    local keep="$1" file count=0
+    local keep="$1"
+    local -a files=()
+    local i
+
     [ "$keep" -le 0 ] && return
-    while IFS= read -r file; do
-        [ -z "$file" ] && continue
-        count=$((count + 1))
-        if [ "$count" -gt "$keep" ]; then
-            rm -f "$file"
-        fi
-    done < <(ls -1t "$LOG_DIR"/update-clean-*.log 2>/dev/null || true)
+    [ -d "$LOG_DIR" ] || return
+
+    if find "$LOG_DIR" -maxdepth 0 -printf '%T@\n' >/dev/null 2>&1; then
+        mapfile -t files < <(
+            find "$LOG_DIR" -maxdepth 1 -type f -name 'update-clean-*.log' -printf '%T@ %p\n' 2>/dev/null \
+                | sort -nr | awk '{print $2}'
+        )
+    else
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            files+=("$file")
+        done < <(ls -1t "$LOG_DIR"/update-clean-*.log 2>/dev/null || true)
+    fi
+
+    for ((i = keep; i < ${#files[@]}; i++)); do
+        rm -f "${files[i]}" || warn "Failed to remove old log ${files[i]}"
+    done
 }
 
 flatpak_update() {
@@ -456,6 +523,7 @@ Options:
   --keep-kernels N  Keep N kernels besides running (default: 2)
   --last, --status  Show information from the last run
   --check, --doctor Run pre-flight checks only (no updates)
+  --debug           Enable shell trace (set -x) for troubleshooting
   --help, -h        Show this help
   --version, -v     Show version information
 
@@ -488,9 +556,16 @@ show_version() {
 
 show_last_run() {
     local last_file="/var/lib/update-clean/last-run"
+    local log_path
+
     if [ -f "$last_file" ]; then
         printf '%s\n' "Last run information:"
         cat "$last_file"
+        log_path=$(awk -F= '/^LOG_FILE=/ {print $2}' "$last_file" 2>/dev/null | tail -n1)
+        if [ -n "$log_path" ] && [ -f "$log_path" ]; then
+            printf '\nTail of log file (%s):\n' "$log_path"
+            tail -n 80 "$log_path" 2>/dev/null || true
+        fi
     else
         printf '%s\n' "No last-run record found."
     fi
@@ -522,10 +597,12 @@ run_preflight_checks() {
     done
 
     printf 'APT lock free: '
-    if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
-        printf '%s\n' "OK"
-    else
+    if ! has_cmd fuser; then
+        printf '%s\n' "UNKNOWN (fuser not installed)"
+    elif is_apt_locked; then
         printf '%s\n' "LOCKED"
+    else
+        printf '%s\n' "OK"
     fi
 
     printf 'systemd-resolved active: '
@@ -578,6 +655,10 @@ while [[ $# -gt 0 ]]; do
             run_preflight_checks
             exit 0
             ;;
+        --debug)
+            DEBUG=true
+            shift
+            ;;
         --help|-h)
             usage
             exit 0
@@ -596,6 +677,11 @@ done
 
 detect_distro
 check_debian_based
+
+if $DEBUG; then
+    set -x
+    info "Debug mode enabled (set -x)"
+fi
 
 if $DRY_RUN; then
     info "DRY RUN MODE ENABLED - No changes will be made"
@@ -623,12 +709,6 @@ rotate_old_logs "${LOG_RETENTION:-0}"
 SCRIPT_START=$(date +%s)
 
 # ────────────────────────────────────────────────────────────────
-# Environment
-# ────────────────────────────────────────────────────────────────
-export DEBIAN_FRONTEND=noninteractive
-export APT_LISTCHANGES_FRONTEND=none
-
-# ────────────────────────────────────────────────────────────────
 # Pre-flight checks
 # ────────────────────────────────────────────────────────────────
 if [ "$EUID" -ne 0 ]; then
@@ -648,18 +728,20 @@ done
 
 warn_low_partition_space "/boot" 51200
 
-if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+if has_cmd fuser && is_apt_locked; then
     warn "APT is locked by another process. Waiting up to 60s..."
     for _ in {1..12}; do
-        if ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+        if ! is_apt_locked; then
             break
         fi
         sleep 5
     done
-    if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+    if is_apt_locked; then
         error "APT still locked after waiting. Please resolve and try again."
         exit 1
     fi
+elif ! has_cmd fuser; then
+    warn "fuser not available; skipping APT lock check"
 fi
 
 if ! check_systemd_resolved; then
@@ -708,7 +790,7 @@ info "Updating package lists..."
 if $DRY_RUN; then
     info "DRY-RUN: Would run apt-get update (skipped)"
 else
-    if ! apt-get update 2>&1 | tee -a "$APT_LOG"; then
+    if ! apt-get update 2>&1 | tee -a "${APT_LOG:-/dev/null}"; then
         warn "apt-get update had issues"
         _record_failure
     fi
@@ -746,8 +828,8 @@ else
     apt_run --purge autoremove || warn "autoremove had issues"
 
     info "Cleaning package cache (autoclean + clean)..."
-    apt-get autoclean 2>&1 | tee -a "$APT_LOG" || _record_failure
-    apt-get clean 2>&1 | tee -a "$APT_LOG" || _record_failure
+    apt-get autoclean 2>&1 | tee -a "${APT_LOG:-/dev/null}" || _record_failure
+    apt-get clean 2>&1 | tee -a "${APT_LOG:-/dev/null}" || _record_failure
 
     if [ "${BACKUP_MODE}" = true ]; then
         info "BACKUP_MODE: Creating backup of /etc before purging configs"
@@ -816,7 +898,9 @@ fi
 
 if ! $DRY_RUN; then
     info "Cleaning partial package lists..."
-    rm -rf /var/lib/apt/lists/partial/*
+    if [ -d /var/lib/apt/lists/partial ]; then
+        rm -rf -- /var/lib/apt/lists/partial/* || warn "Failed to clean partial apt lists"
+    fi
 
     if command -v updatedb >/dev/null 2>&1; then
         safe_run "Updating locate database" updatedb

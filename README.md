@@ -53,6 +53,7 @@ sudo ./update-clean.sh --no-kernel
 sudo ./update-clean.sh --keep-kernels 3
 sudo ./update-clean.sh --check
 sudo ./update-clean.sh --last
+sudo ./update-clean.sh --debug
 ```
 
 **Dry-run:** skips `apt-get update` and logs planned `apt-get` commands instead of simulating them. It may still use the network for read-only listings (`apt list --upgradable`, autoremove preview).
@@ -63,9 +64,10 @@ Run periodically (recommended weekly).
 
 Optional config files (sourced in order if present):
 
-- `/etc/update-clean.conf`
-- `~/.config/update-clean.conf`
-- `~/.update-clean.conf`
+- `/etc/update-clean.conf` (must be root-owned)
+- When run as root: `/root/.config/update-clean.conf`, `/root/.update-clean.conf`
+- When run via `sudo`: also the invoking user's `~/.config/update-clean.conf` and `~/.update-clean.conf`
+- When run as a normal user: `$HOME/.config/update-clean.conf`, `$HOME/.update-clean.conf`
 
 Example:
 
@@ -77,13 +79,18 @@ ADMIN_EMAIL=admin@example.com
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 ```
 
-**Config security:** `/etc/update-clean.conf` must be owned by root (non-root-owned system config is skipped). User config files (`~/.config/update-clean.conf`, `~/.update-clean.conf`) are sourced without ownership checks — only use configs you trust.
+**Config security:** `/etc/update-clean.conf` must be owned by root (non-root-owned system config is skipped). User-level configs are sourced without ownership checks — only use configs you trust.
+
+**KERNEL_KEEP:** number of installed kernel packages to retain *besides* the running kernel (default: 2). Override with `--keep-kernels N` or `KERNEL_KEEP=N` in config.
+
+**BACKUP_MODE:** when `true`, creates a `/var/backups/etc-before-cleanup-*.tar.gz` archive before purging residual config packages.
 
 ### Logging & Records
 
 - Detailed logs: `/var/log/update-clean/`
 - Only the most recent 3 logs are kept automatically
-- Last run record: `/var/lib/update-clean/last-run` (includes `STATUS` and `FAILURES`)
+- Last run record: `/var/lib/update-clean/last-run` (includes `STATUS`, `FAILURES`, and `LOG_FILE`)
+- `sudo ./update-clean.sh --last` shows the record plus the last 80 lines of the log
 
 ### Safety
 

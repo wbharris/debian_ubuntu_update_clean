@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.2] - 2026-06-22
+
+### Added
+- `has_cmd()`, `is_apt_locked()`, `format_cmd_args()`, and `list_installed_kernel_images()` helpers
+- `--debug` flag for shell trace (`set -x`) troubleshooting
+- `--last` / `--status` now includes tail of the last log file
+- Sudo-aware config loading (`/etc`, root, and `SUDO_USER` home configs)
+
+### Changed
+- `apt_run()` and tee targets default `APT_LOG` to `/dev/null` when unset
+- `find_running_kernel_pkg()` prefers `/boot/vmlinuz-*` package ownership
+- Kernel listing filters to `install ok installed` packages only
+- Log rotation uses `find` + mtime sort (falls back to `ls` on non-GNU find)
+- `fuser` and `ping` guarded when tools are missing
+- `DEBIAN_FRONTEND=noninteractive` exported before any apt operations
+- Safer partial apt list cleanup with directory check
+
 ## [1.4.1] - 2026-06-22
 
 ### Added
