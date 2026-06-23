@@ -6,6 +6,9 @@
 # Configurable via env or /etc/update-clean.conf
 
 set -euo pipefail
+set -o errtrace
+
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 # ────────────────────────────────────────────────────────────────
 # Defaults & Config
@@ -14,7 +17,7 @@ DRY_RUN=false
 SKIP_KERNEL=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 SCRIPT_NAME="update-clean"
-SCRIPT_VERSION=$(cat VERSION 2>/dev/null || echo "unknown")
+SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 
 # Load config file if present
 for conf in /etc/update-clean.conf "$HOME/.config/update-clean.conf" "$HOME/.update-clean.conf"; do
@@ -22,19 +25,32 @@ for conf in /etc/update-clean.conf "$HOME/.config/update-clean.conf" "$HOME/.upd
 done
 
 # ────────────────────────────────────────────────────────────────
-# Colors (define early)
+# Colors (TTY-aware)
 # ────────────────────────────────────────────────────────────────
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+if [ -t 1 ]; then
+    RED='\033[0;31m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[1;33m'
+    BLUE='\033[0;34m'
+    NC='\033[0m'
+else
+    RED=''
+    GREEN=''
+    YELLOW=''
+    BLUE=''
+    NC=''
+fi
 
 log()      { echo -e "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 info()     { echo -e "${BLUE}[INFO]${NC} $1"; }
 success()  { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
 warn()     { echo -e "${YELLOW}[WARNING]${NC} $1"; }
 error()    { echo -e "${RED}[ERROR]${NC} $1"; }
+
+if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
+    warn "Invalid LOG_RETENTION='$LOG_RETENTION', using default 3"
+    LOG_RETENTION=3
+fi
 
 # ────────────────────────────────────────────────────────────────
 # Distro detection
@@ -82,26 +98,73 @@ check_debian_based() {
 }
 
 check_connectivity() {
-    local label host
+    local host="${ARCHIVE_HOST:-1.1.1.1}"
 
-    if [ -n "$ARCHIVE_HOST" ]; then
-        label="$ARCHIVE_HOST"
-        host="$ARCHIVE_HOST"
-    else
-        label="network"
-        host="1.1.1.1"
-    fi
-
-    if timeout 5 bash -c "echo > /dev/tcp/${host}/443" 2>/dev/null; then
-        return 0
+    if command -v curl >/dev/null 2>&1; then
+        if curl -sSf --connect-timeout 5 "https://${host}/" >/dev/null 2>&1; then
+            return 0
+        fi
     fi
 
     if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-        warn "Could not reach $label on port 443; fallback ping to 8.8.8.8 succeeded."
+        warn "Cannot reach https://${host}. Ping to 8.8.8.8 succeeded; proceeding."
         return 0
     fi
 
     return 1
+}
+
+apt_run() {
+    if $DRY_RUN; then
+        info "DRY-RUN: apt $*"
+        apt -s "$@" 2>&1 | tee -a "$APT_LOG" || true
+    else
+        DEBIAN_FRONTEND=noninteractive apt-get -y "$@" 2>&1 | tee -a "$APT_LOG"
+    fi
+}
+
+remove_old_kernels() {
+    local -a kernels=()
+    local delcount pkg i
+
+    mapfile -t kernels < <(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null | sort -V)
+
+    if [ "${#kernels[@]}" -le 2 ]; then
+        info "No old kernels to remove."
+        return 1
+    fi
+
+    delcount=$(( ${#kernels[@]} - 2 ))
+    KERNELS_REMOVED=true
+
+    for ((i = 0; i < delcount; i++)); do
+        pkg="${kernels[i]}"
+        if $DRY_RUN; then
+            info "DRY-RUN: Would purge old kernel: $pkg"
+            continue
+        fi
+        info "Purging old kernel: $pkg"
+        apt_run purge "$pkg" || warn "Failed to purge $pkg"
+        apt_run purge "${pkg/linux-image/linux-headers}" || true
+        apt_run purge "${pkg/linux-image/linux-modules}" || true
+    done
+}
+
+show_dry_run_preview() {
+    info "DRY-RUN preview: upgradable packages"
+    apt list --upgradable 2>/dev/null | sed -n '1,40p' || true
+    info "DRY-RUN preview: autoremove simulation"
+    apt -s autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
+}
+
+hold_critical_packages() {
+    local curpkg
+    curpkg=$(dpkg-query -W -f='${Package}\n' "linux-image-$(uname -r)" 2>/dev/null || true)
+    if [ -n "$curpkg" ]; then
+        apt-mark hold base-files base-passwd bash coreutils util-linux "$curpkg" 2>/dev/null || true
+    else
+        apt-mark hold base-files base-passwd bash coreutils util-linux 2>/dev/null || true
+    fi
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -129,9 +192,9 @@ show_version() {
     echo "$SCRIPT_NAME $SCRIPT_VERSION"
     echo "Distro: $DISTRO_NAME"
 
-    if [ -d .git ]; then
+    if [ -d "$SCRIPT_DIR/.git" ]; then
         local commit
-        commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        commit=$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
         echo "Commit: $commit"
     fi
 
@@ -273,8 +336,9 @@ exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
 log "Running $SCRIPT_NAME version: $SCRIPT_VERSION on $DISTRO_NAME"
 
 log "Cleaning up old logs (keeping last $LOG_RETENTION)..."
-find "$LOG_DIR" -name "update-clean-*.log" -type f -printf '%T@ %p\0' | \
-    sort -z -n | head -zn "-$LOG_RETENTION" | cut -zd' ' -f2- | xargs -0r rm -f
+if [ "${LOG_RETENTION:-0}" -gt 0 ]; then
+    ls -1t "$LOG_DIR"/update-clean-*.log 2>/dev/null | tail -n +"$((LOG_RETENTION + 1))" | xargs -r rm -f --
+fi
 
 SCRIPT_START=$(date +%s)
 
@@ -336,15 +400,15 @@ fi
 BEFORE=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s}')
 
 # ────────────────────────────────────────────────────────────────
-# Simple file lock + trap
+# File lock + trap
 # ────────────────────────────────────────────────────────────────
-LOCKFILE="/var/run/update-clean.lock"
-exec 200>"$LOCKFILE"
+LOCKFILE="/run/update-clean.lock"
+exec 200>"$LOCKFILE" || { error "Cannot open lockfile $LOCKFILE"; exit 1; }
 if ! flock -n 200; then
     error "Another instance of $SCRIPT_NAME is already running."
     exit 1
 fi
-trap 'rm -f "$LOCKFILE"' EXIT
+trap 'rc=$?; flock -u 200; exec 200>&-; rm -f "$LOCKFILE"; exit $rc' INT TERM EXIT
 
 safe_run() {
     local desc="$1"
@@ -355,6 +419,8 @@ safe_run() {
     fi
 }
 
+KERNELS_REMOVED=false
+
 # ────────────────────────────────────────────────────────────────
 # Core update
 # ────────────────────────────────────────────────────────────────
@@ -362,69 +428,58 @@ info "Configuring any interrupted package installations..."
 dpkg --configure -a || warn "dpkg --configure -a had issues"
 
 info "Fixing broken dependencies..."
-apt install -f -y || warn "apt install -f had issues"
+apt_run install -f || warn "apt install -f had issues"
 
 info "Updating package lists..."
-apt update
+if $DRY_RUN; then
+    info "DRY-RUN: apt update"
+    apt -s update 2>&1 | tee -a "$APT_LOG" || true
+else
+    apt-get update 2>&1 | tee -a "$APT_LOG"
+fi
 
 info "Checking package cache integrity (apt-get check)..."
 apt-get check || warn "Package cache check reported issues"
 
-APT_OPTS="-y"
-if $DRY_RUN; then
-    APT_OPTS="-s"
-    info "DRY-RUN: Using simulation mode for APT commands"
-fi
-
 info "Upgrading packages..."
-apt upgrade $APT_OPTS 2>&1 | tee -a "$APT_LOG" || warn "apt upgrade had issues"
+apt_run upgrade || warn "apt upgrade had issues"
 
 info "Listing upgradable packages after initial upgrade:"
 apt list --upgradable 2>/dev/null || true
 
+if $DRY_RUN; then
+    show_dry_run_preview
+fi
+
 info "Performing full system upgrade..."
-apt full-upgrade $APT_OPTS 2>&1 | tee -a "$APT_LOG" || warn "full-upgrade had issues"
+apt_run full-upgrade || warn "full-upgrade had issues"
 
 # ────────────────────────────────────────────────────────────────
 # Complete cleanup
 # ────────────────────────────────────────────────────────────────
 info "Holding critical packages to prevent accidental removal..."
-apt-mark hold base-files base-passwd bash coreutils util-linux "linux-image-$(uname -r)" 2>/dev/null || true
+hold_critical_packages
 
 if $DRY_RUN; then
     info "DRY-RUN: Would run autoremove, clean, purge configs, kernel removal, etc."
+    apt -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
 else
     info "Removing unnecessary packages (autoremove --purge)..."
-    apt --purge autoremove -y 2>&1 | tee -a "$APT_LOG" || warn "autoremove had issues"
+    apt_run --purge autoremove || warn "autoremove had issues"
 
     info "Cleaning package cache (autoclean + clean)..."
-    apt autoclean
-    apt clean
+    apt-get autoclean 2>&1 | tee -a "$APT_LOG"
+    apt-get clean 2>&1 | tee -a "$APT_LOG"
 
     info "Purging residual configuration files..."
-    apt purge '~c' -y 2>&1 | tee -a "$APT_LOG" || warn "Purging residual configs had issues"
+    apt_run purge '~c' || warn "Purging residual configs had issues"
 fi
 
-KERNELS_REMOVED=false
 if $SKIP_KERNEL; then
     info "Skipping old kernel removal (--no-kernel)."
-elif $DRY_RUN; then
-    info "DRY-RUN: Would remove old kernels (keeping current + previous)."
 else
     info "Removing old kernels (keeping current + previous)..."
-    CURRENT=$(uname -r)
-    KERNELS=$(dpkg -l 'linux-image-*' 2>/dev/null | awk '/^ii/ {print $2}' | grep -v "$CURRENT" | sort -V | head -n -1 || true)
-    if [ -n "$KERNELS" ]; then
-        KERNELS_REMOVED=true
-        while read -r k; do
-            [ -z "$k" ] && continue
-            apt purge -y "$k" 2>&1 | tee -a "$APT_LOG" || warn "Failed to purge $k"
-            echo "$k" | sed 's/linux-image/linux-headers/' | xargs -r apt purge -y 2>/dev/null || true
-            echo "$k" | sed 's/linux-image/linux-modules/'  | xargs -r apt purge -y 2>/dev/null || true
-        done <<< "$KERNELS"
-    else
-        info "No old kernels to remove."
-    fi
+    remove_old_kernels || true
 fi
 
 if $KERNELS_REMOVED && command -v update-grub >/dev/null 2>&1 && ! $DRY_RUN; then
