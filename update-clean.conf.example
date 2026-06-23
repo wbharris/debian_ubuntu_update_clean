@@ -7,8 +7,13 @@
 # Number of log files to retain (default: 3)
 # LOG_RETENTION=5
 
-# Kernels to keep in addition to the running kernel (default: 2)
+# Kernels to keep in addition to the running kernel (default: 2, max 10)
 # KERNEL_KEEP=2
+
+# Optional path overrides
+# LOG_DIR=/var/log/update-clean
+# LOCKFILE=/run/update-clean.lock
+# LAST_RUN_DIR=/var/lib/update-clean
 
 # Backup /etc before purging residual configs (default: false)
 # BACKUP_MODE=true

@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.7] - 2026-06-22
+
+### Added
+- Configurable `LOG_DIR`, `LOCKFILE`, and `LAST_RUN_DIR` (env overrides)
+- `KERNEL_KEEP_MAX` (default: 10) with validation on CLI and config
+
+### Changed
+- Kernel removal uses safe array slices (`"${to_remove[@]:0:delcount}"`)
+- ERR trap registered before EXIT trap; `err_trap` exits explicitly to run `cleanup`
+- Meta kernel filter matches `-generic-hwe` and similar variants
+- `detect_distro()` defaults `ARCHIVE_HOST` to `deb.debian.org`
+- `has_cmd` used consistently instead of raw `command -v`
+- `cleanup()` calls `sync` to flush log pipeline output
+
+### Fixed
+- `KERNEL_KEEP` comparisons use explicit defaults and bounds checks
+- Kernel `delcount` validated before array access
+
 ## [1.4.6] - 2026-06-22
 
 ### Added

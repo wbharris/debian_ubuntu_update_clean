@@ -39,8 +39,12 @@ DEBUG=false
 SKIP_CONNECTIVITY=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 KERNEL_KEEP=${KERNEL_KEEP:-2}
+KERNEL_KEEP_MAX=${KERNEL_KEEP_MAX:-10}
 BACKUP_MODE=${BACKUP_MODE:-false}
 REBOOT_IF_REQUIRED=${REBOOT_IF_REQUIRED:-false}
+LOG_DIR="${LOG_DIR:-/var/log/update-clean}"
+LOCKFILE="${LOCKFILE:-/run/update-clean.lock}"
+LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
@@ -130,6 +134,9 @@ validate_config_values() {
     if ! [[ "$KERNEL_KEEP" =~ ^[0-9]+$ ]] || [ "$KERNEL_KEEP" -lt 0 ]; then
         warn "Invalid KERNEL_KEEP='$KERNEL_KEEP', using default 2"
         KERNEL_KEEP=2
+    elif [ "$KERNEL_KEEP" -gt "$KERNEL_KEEP_MAX" ]; then
+        warn "KERNEL_KEEP=$KERNEL_KEEP exceeds max $KERNEL_KEEP_MAX, using $KERNEL_KEEP_MAX"
+        KERNEL_KEEP=$KERNEL_KEEP_MAX
     fi
 }
 
@@ -284,7 +291,7 @@ list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
         | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
         | grep -E '^linux-image(-unsigned)?-[0-9][0-9a-zA-Z.\-+]*' \
-        | grep -Ev '(-meta|-rt|linux-image-amd64|linux-image-generic)$' \
+        | grep -Ev 'linux-image.*(-meta|-rt|-amd64|-generic)(-hwe)?$' \
         | sort -V
 }
 
@@ -340,10 +347,12 @@ detect_distro() {
             ARCHIVE_HOST=""
             ;;
     esac
+
+    ARCHIVE_HOST="${ARCHIVE_HOST:-deb.debian.org}"
 }
 
 check_debian_based() {
-    if ! command -v apt >/dev/null 2>&1; then
+    if ! has_cmd apt; then
         error "This script requires apt and is intended for Debian-based systems."
         exit 1
     fi
@@ -521,21 +530,26 @@ remove_old_kernels() {
         to_remove+=("$pkg")
     done
 
-    if [ "${#to_remove[@]}" -le "$KERNEL_KEEP" ]; then
-        info "No old kernels to remove (keeping $KERNEL_KEEP beside running kernel)."
+    local keep="${KERNEL_KEEP:-2}"
+
+    if [ "${#to_remove[@]}" -le "$keep" ]; then
+        info "No old kernels to remove (keeping $keep beside running kernel)."
         return 0
     fi
 
-    delcount=$(( ${#to_remove[@]} - $KERNEL_KEEP ))
+    delcount=$(( ${#to_remove[@]} - keep ))
+    if [ "$delcount" -lt 1 ] || [ "$delcount" -gt "${#to_remove[@]}" ]; then
+        warn "Kernel removal count out of range; skipping removal"
+        return 0
+    fi
     KERNELS_REMOVED=true
 
     info "Kernels scheduled for removal ($delcount):"
-    for ((i = 0; i < delcount; i++)); do
-        info "  ${to_remove[i]}"
+    for pkg in "${to_remove[@]:0:delcount}"; do
+        info "  $pkg"
     done
 
-    for ((i = 0; i < delcount; i++)); do
-        pkg="${to_remove[i]}"
+    for pkg in "${to_remove[@]:0:delcount}"; do
         if $DRY_RUN; then
             info "DRY-RUN: Would purge old kernel: $pkg"
             continue
@@ -599,7 +613,7 @@ flatpak_uninstall_unused() {
 remove_disabled_snaps() {
     local name rev
 
-    if command -v jq >/dev/null 2>&1; then
+    if has_cmd jq; then
         while IFS= read -r line; do
             [ -z "$line" ] && continue
             name="${line%% *}"
@@ -632,11 +646,11 @@ hold_critical_packages() {
 send_completion_notification() {
     local msg="$1"
 
-    if command -v notify-send >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+    if has_cmd notify-send && [ -n "${DISPLAY:-}" ]; then
         notify-send "Update & Cleanup" "$msg" 2>/dev/null || true
     fi
 
-    if [ -n "${ADMIN_EMAIL:-}" ] && command -v mail >/dev/null 2>&1; then
+    if [ -n "${ADMIN_EMAIL:-}" ] && has_cmd mail; then
         printf '%s\n' "$msg" | mail -s "$SCRIPT_NAME completion" "$ADMIN_EMAIL" 2>/dev/null || true
     fi
 }
@@ -652,7 +666,7 @@ safe_run() {
 }
 
 check_systemd_resolved() {
-    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    if has_cmd systemctl && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
         return 0
     fi
     return 1
@@ -679,7 +693,10 @@ Options:
 
 Environment / Config:
   LOG_RETENTION     Number of logs to keep (default: 3)
-  KERNEL_KEEP       Kernels to keep besides running (default: 2)
+  KERNEL_KEEP       Kernels to keep besides running (default: 2, max 10)
+  LOG_DIR           Log directory (default: /var/log/update-clean)
+  LOCKFILE          Instance lock file (default: /run/update-clean.lock)
+  LAST_RUN_DIR      Last-run record directory (default: /var/lib/update-clean)
   BACKUP_MODE       Backup /etc before purging configs (default: false)
   REBOOT_IF_REQUIRED Reboot automatically if required (default: false)
   ADMIN_EMAIL       Optional email address for completion notification
@@ -768,7 +785,7 @@ run_preflight_checks() {
     printf 'Required tools: '
     local missing=""
     for tool in apt dpkg; do
-        if ! command -v "$tool" >/dev/null 2>&1; then
+        if ! has_cmd "$tool"; then
             missing="$missing $tool"
         fi
     done
@@ -799,6 +816,10 @@ while [[ $# -gt 0 ]]; do
             fi
             if ! [[ "$1" =~ ^[0-9]+$ ]]; then
                 error "--keep-kernels requires a numeric value"
+                exit 1
+            fi
+            if [ "$1" -gt "$KERNEL_KEEP_MAX" ]; then
+                error "--keep-kernels cannot exceed $KERNEL_KEEP_MAX"
                 exit 1
             fi
             KERNEL_KEEP="$1"
@@ -858,7 +879,6 @@ fi
 # ────────────────────────────────────────────────────────────────
 # Logging (with color stripping for file)
 # ────────────────────────────────────────────────────────────────
-LOG_DIR="/var/log/update-clean"
 
 if ! mkdir -p "$LOG_DIR"; then
     printf '%s\n' "Failed to create log directory $LOG_DIR" >&2
@@ -938,7 +958,6 @@ BEFORE=$(get_used_kb_for_paths / /var /boot)
 # ────────────────────────────────────────────────────────────────
 # File lock + trap
 # ────────────────────────────────────────────────────────────────
-LOCKFILE="/run/update-clean.lock"
 exec 200>"$LOCKFILE" || { error "Cannot open lockfile $LOCKFILE"; exit 1; }
 if ! flock -n 200; then
     error "Another instance of $SCRIPT_NAME is already running."
@@ -959,12 +978,14 @@ err_trap() {
             error "  ${BASH_SOURCE[i]}:${BASH_LINENO[i - 1]} ${FUNCNAME[i]:-main}"
         done
     fi
+    exit "$rc"
 }
 
 cleanup() {
     trap - INT TERM EXIT ERR
 
     local rc=${1:-$?}
+    sync 2>/dev/null || true
     flock -u 200 2>/dev/null || true
     exec 200>&- 2>/dev/null || true
     rm -f "$LOCKFILE" 2>/dev/null || true
@@ -974,8 +995,8 @@ cleanup() {
     exit "$rc"
 }
 
-trap 'cleanup $?' INT TERM EXIT
 trap 'err_trap' ERR
+trap 'cleanup $?' INT TERM EXIT
 
 # ────────────────────────────────────────────────────────────────
 # Core update
@@ -1058,11 +1079,11 @@ if $KERNELS_REMOVED; then
     fi
 fi
 
-if $KERNELS_REMOVED && command -v update-grub >/dev/null 2>&1 && ! $DRY_RUN; then
+if $KERNELS_REMOVED && has_cmd update-grub && ! $DRY_RUN; then
     safe_run "Updating GRUB bootloader" update-grub
 fi
 
-if command -v flatpak >/dev/null 2>&1; then
+if has_cmd flatpak; then
     if $DRY_RUN; then
         info "DRY-RUN: Would update Flatpaks and remove unused"
     else
@@ -1071,7 +1092,7 @@ if command -v flatpak >/dev/null 2>&1; then
     fi
 fi
 
-if command -v snap >/dev/null 2>&1; then
+if has_cmd snap; then
     if $DRY_RUN; then
         info "DRY-RUN: Would refresh Snaps and remove old revisions"
     else
@@ -1080,7 +1101,7 @@ if command -v snap >/dev/null 2>&1; then
     fi
 fi
 
-if command -v fwupdmgr >/dev/null 2>&1; then
+if has_cmd fwupdmgr; then
     if $DRY_RUN; then
         info "DRY-RUN: Would update firmware"
     else
@@ -1089,7 +1110,7 @@ if command -v fwupdmgr >/dev/null 2>&1; then
     fi
 fi
 
-if command -v journalctl >/dev/null 2>&1; then
+if has_cmd journalctl; then
     if $DRY_RUN; then
         info "DRY-RUN: Would vacuum journal logs"
     else
@@ -1103,11 +1124,11 @@ if ! $DRY_RUN; then
         rm -rf -- /var/lib/apt/lists/partial/* || warn "Failed to clean partial apt lists"
     fi
 
-    if command -v updatedb >/dev/null 2>&1; then
+    if has_cmd updatedb; then
         safe_run "Updating locate database" updatedb
     fi
 
-    if command -v mandb >/dev/null 2>&1; then
+    if has_cmd mandb; then
         safe_run "Rebuilding man page database" mandb -q
     fi
 else
@@ -1140,7 +1161,6 @@ else
     success "No reboot required from this run."
 fi
 
-LAST_RUN_DIR="/var/lib/update-clean"
 LAST_RUN_FILE="$LAST_RUN_DIR/last-run"
 RUN_STATUS=success
 [ "$EXIT_CODE" -ne 0 ] && RUN_STATUS=failure
@@ -1178,7 +1198,7 @@ else
     info "DRY-RUN: Would write last-run record"
 fi
 
-if command -v needrestart >/dev/null 2>&1 && ! $DRY_RUN; then
+if has_cmd needrestart && ! $DRY_RUN; then
     info "Checking services that need restart..."
     needrestart -r a -l 2>/dev/null || true
 elif $DRY_RUN; then
