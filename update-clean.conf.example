@@ -7,5 +7,8 @@
 # Number of log files to retain (default: 3)
 # LOG_RETENTION=5
 
-# Kernel removal keeps the running kernel plus one previous version.
+# Kernels to keep in addition to the running kernel (default: 2)
+# KERNEL_KEEP=2
+
 # Use --no-kernel on the command line to skip kernel cleanup entirely.
+# /etc/update-clean.conf must be owned by root when installed system-wide.

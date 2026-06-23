@@ -68,7 +68,10 @@ Example:
 
 ```bash
 LOG_RETENTION=5
+KERNEL_KEEP=2
 ```
+
+`/etc/update-clean.conf` must be owned by root. Other config paths are skipped if `/etc` file is not root-owned.
 
 ### Logging & Records
 

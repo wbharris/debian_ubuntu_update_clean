@@ -2,6 +2,24 @@
 
 All notable changes to this project are documented here.
 
+## [1.3.0] - 2026-06-23
+
+### Added
+- `find_running_kernel_pkg()` for reliable running-kernel package detection
+- `purge_kernel_related()` for headers/modules package cleanup
+- `KERNEL_KEEP` config option (default: 2)
+- Config ownership check for `/etc/update-clean.conf` (must be root-owned)
+- DNS resolution fallback (`getent`) in connectivity checks
+
+### Changed
+- Kernel removal skips when running kernel package cannot be matched
+- Dry-run skips `apt-get update` simulation; documents network use for listings
+- Connectivity check pings archive host before generic 8.8.8.8 fallback
+
+### Fixed
+- Running kernel no longer at risk when package name differs from `linux-image-$(uname -r)`
+- Header/modules purge handles `linux-headers-*`, `linux-modules-*` naming variants
+
 ## [1.2.1] - 2026-06-23
 
 ### Removed

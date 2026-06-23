@@ -24,15 +24,11 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DRY_RUN=false
 SKIP_KERNEL=false
 LOG_RETENTION=${LOG_RETENTION:-3}
+KERNEL_KEEP=${KERNEL_KEEP:-2}
 SCRIPT_NAME="update-clean"
 SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 EXIT_CODE=0
 KERNELS_REMOVED=false
-
-# Load config file if present
-for conf in /etc/update-clean.conf "$HOME/.config/update-clean.conf" "$HOME/.update-clean.conf"; do
-    [ -f "$conf" ] && source "$conf"
-done
 
 # ────────────────────────────────────────────────────────────────
 # Colors (TTY-aware)
@@ -59,9 +55,32 @@ error()   { printf '%b\n' "${RED}[ERROR]${NC} $1"; }
 
 _record_failure() { EXIT_CODE=$((EXIT_CODE + 1)); }
 
+load_config_files() {
+    local conf owner
+    for conf in /etc/update-clean.conf "$HOME/.config/update-clean.conf" "$HOME/.update-clean.conf"; do
+        [ -f "$conf" ] || continue
+        if [[ "$conf" == /etc/* ]]; then
+            owner=$(stat -c %u "$conf" 2>/dev/null || echo "")
+            if [ "$owner" != "0" ]; then
+                warn "Config $conf not owned by root; skipping"
+                continue
+            fi
+        fi
+        # shellcheck source=/dev/null
+        source "$conf"
+    done
+}
+
+load_config_files
+
 if ! [[ "$LOG_RETENTION" =~ ^[0-9]+$ ]] || [ "$LOG_RETENTION" -lt 0 ]; then
     warn "Invalid LOG_RETENTION='$LOG_RETENTION', using default 3"
     LOG_RETENTION=3
+fi
+
+if ! [[ "$KERNEL_KEEP" =~ ^[0-9]+$ ]] || [ "$KERNEL_KEEP" -lt 1 ]; then
+    warn "Invalid KERNEL_KEEP='$KERNEL_KEEP', using default 2"
+    KERNEL_KEEP=2
 fi
 
 # ────────────────────────────────────────────────────────────────
@@ -117,7 +136,7 @@ check_debian_based() {
 }
 
 check_connectivity() {
-    local host="${ARCHIVE_HOST:-1.1.1.1}"
+    local host="${ARCHIVE_HOST:-deb.debian.org}"
 
     if command -v curl >/dev/null 2>&1; then
         if curl -sSf --connect-timeout 5 "https://${host}/" >/dev/null 2>&1; then
@@ -129,12 +148,53 @@ check_connectivity() {
         fi
     fi
 
+    if command -v getent >/dev/null 2>&1 && getent hosts "$host" >/dev/null 2>&1; then
+        warn "HTTPS check failed but DNS resolves for $host; proceeding."
+        return 0
+    fi
+
+    if ping -c 1 -W 3 "$host" >/dev/null 2>&1; then
+        warn "Could not reach https://${host} but host responds to ping; proceeding."
+        return 0
+    fi
+
     if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-        warn "Cannot reach https://${host}. Ping to 8.8.8.8 succeeded; proceeding."
+        warn "Could not reach $host but internet ping (8.8.8.8) succeeded; proceeding."
         return 0
     fi
 
     return 1
+}
+
+find_running_kernel_pkg() {
+    local running_ver="$1"
+    local kp
+
+    [ -z "$running_ver" ] && return 1
+
+    for kp in $(dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null | sort -V); do
+        if [[ "$kp" == *"$running_ver"* ]]; then
+            printf '%s' "$kp"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+purge_kernel_related() {
+    local pkg="$1"
+    local ver suffix candidate
+
+    if [[ "$pkg" =~ ^linux-image-(.+)$ ]]; then
+        ver="${BASH_REMATCH[1]}"
+        for suffix in headers modules-extra modules; do
+            candidate="linux-${suffix}-${ver}"
+            if dpkg-query -W -f='${Status}' "$candidate" 2>/dev/null | grep -q 'install ok installed'; then
+                apt_run purge "$candidate" || true
+            fi
+        done
+    fi
 }
 
 apt_run() {
@@ -163,11 +223,17 @@ apt_run() {
 remove_old_kernels() {
     local -a kernels=()
     local -a to_remove=()
-    local keep=2
     local running_pkg running_ver pkg i delcount
 
     running_ver=$(uname -r 2>/dev/null || true)
-    running_pkg=$(dpkg-query -W -f='${Package}\n' "linux-image-${running_ver}" 2>/dev/null || true)
+    running_pkg=$(find_running_kernel_pkg "$running_ver" || true)
+
+    if [ -n "$running_pkg" ]; then
+        info "Running kernel package: $running_pkg ($running_ver)"
+    elif [ -n "$running_ver" ]; then
+        warn "Could not match installed package for running kernel $running_ver; skipping kernel removal"
+        return 0
+    fi
 
     mapfile -t kernels < <(
         dpkg-query -W -f='${Package}\n' 'linux-image-[0-9]*' 2>/dev/null \
@@ -184,15 +250,18 @@ remove_old_kernels() {
         if [ -n "$running_pkg" ] && [ "$pkg" = "$running_pkg" ]; then
             continue
         fi
+        if [ -n "$running_ver" ] && [[ "$pkg" == *"$running_ver"* ]]; then
+            continue
+        fi
         to_remove+=("$pkg")
     done
 
-    if [ "${#to_remove[@]}" -le "$keep" ]; then
-        info "No old kernels to remove."
+    if [ "${#to_remove[@]}" -le "$KERNEL_KEEP" ]; then
+        info "No old kernels to remove (keeping $KERNEL_KEEP beside running kernel)."
         return 0
     fi
 
-    delcount=$(( ${#to_remove[@]} - keep ))
+    delcount=$(( ${#to_remove[@]} - KERNEL_KEEP ))
     KERNELS_REMOVED=true
 
     for ((i = 0; i < delcount; i++)); do
@@ -203,8 +272,7 @@ remove_old_kernels() {
         fi
         info "Purging old kernel: $pkg"
         apt_run purge "$pkg" || warn "Failed to purge $pkg"
-        apt_run purge "${pkg/linux-image/linux-headers}" || true
-        apt_run purge "${pkg/linux-image/linux-modules}" || true
+        purge_kernel_related "$pkg"
     done
 }
 
@@ -217,7 +285,7 @@ show_dry_run_preview() {
 
 hold_critical_packages() {
     local curpkg
-    curpkg=$(dpkg-query -W -f='${Package}\n' "linux-image-$(uname -r)" 2>/dev/null || true)
+    curpkg=$(find_running_kernel_pkg "$(uname -r)" || true)
     if [ -n "$curpkg" ]; then
         apt-mark hold base-files base-passwd bash coreutils util-linux "$curpkg" 2>/dev/null || true
     else
@@ -259,6 +327,7 @@ Options:
 
 Environment / Config:
   LOG_RETENTION     Number of logs to keep (default: 3)
+  KERNEL_KEEP       Kernels to keep besides running (default: 2)
 USAGE
 }
 
@@ -393,6 +462,7 @@ check_debian_based
 
 if $DRY_RUN; then
     info "DRY RUN MODE ENABLED - No changes will be made"
+    info "DRY-RUN may still use the network to list upgradable packages"
 fi
 
 # ────────────────────────────────────────────────────────────────
@@ -511,8 +581,7 @@ apt_run install -f || warn "apt install -f had issues"
 
 info "Updating package lists..."
 if $DRY_RUN; then
-    info "DRY-RUN: apt-get update"
-    apt-get -s update 2>&1 | tee -a "$APT_LOG" || true
+    info "DRY-RUN: Would run apt-get update (skipped)"
 else
     if ! apt-get update 2>&1 | tee -a "$APT_LOG"; then
         warn "apt-get update had issues"
