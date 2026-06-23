@@ -50,9 +50,12 @@ Options:
 ```bash
 sudo ./update-clean.sh --dry-run
 sudo ./update-clean.sh --no-kernel
+sudo ./update-clean.sh --keep-kernels 3
 sudo ./update-clean.sh --check
 sudo ./update-clean.sh --last
 ```
+
+**Dry-run:** skips `apt-get update` and logs planned `apt-get` commands instead of simulating them. It may still use the network for read-only listings (`apt list --upgradable`, autoremove preview).
 
 Run periodically (recommended weekly).
 
@@ -69,9 +72,12 @@ Example:
 ```bash
 LOG_RETENTION=5
 KERNEL_KEEP=2
+BACKUP_MODE=true
+ADMIN_EMAIL=admin@example.com
+CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 ```
 
-`/etc/update-clean.conf` must be owned by root. Other config paths are skipped if `/etc` file is not root-owned.
+**Config security:** `/etc/update-clean.conf` must be owned by root (non-root-owned system config is skipped). User config files (`~/.config/update-clean.conf`, `~/.update-clean.conf`) are sourced without ownership checks — only use configs you trust.
 
 ### Logging & Records
 
@@ -106,7 +112,7 @@ sudo systemctl enable --now update-clean.timer
 
 - Debian (stable, testing, unstable)
 - Ubuntu (LTS and interim releases)
-- Other apt-based derivatives may work but are not explicitly tested
+- Kali Linux and other apt-based derivatives (Mint, Pop!_OS, etc.) — may work but are not all explicitly tested
 
 ### Versioning
 

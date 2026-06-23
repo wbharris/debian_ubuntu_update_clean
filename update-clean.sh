@@ -17,6 +17,10 @@ fi
 umask 022
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+if [ ! -d "$SCRIPT_DIR" ] || [ ! -r "$SCRIPT_DIR" ]; then
+    printf '%s\n' "Error: Cannot access script directory: $SCRIPT_DIR" >&2
+    exit 1
+fi
 
 # ────────────────────────────────────────────────────────────────
 # Defaults & Config
@@ -25,6 +29,8 @@ DRY_RUN=false
 SKIP_KERNEL=false
 LOG_RETENTION=${LOG_RETENTION:-3}
 KERNEL_KEEP=${KERNEL_KEEP:-2}
+BACKUP_MODE=${BACKUP_MODE:-false}
+CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 SCRIPT_NAME="update-clean"
 SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
 EXIT_CODE=0
@@ -93,6 +99,60 @@ get_avail_kb() {
     printf '%d' "${val:-0}"
 }
 
+check_partition_space() {
+    local part="$1" min_kb="${2:-2097152}"
+    local avail_kb
+
+    [ -d "$part" ] || return 0
+    avail_kb=$(get_avail_kb "$part")
+    if [ "$avail_kb" -lt "$min_kb" ]; then
+        if [ "$min_kb" -ge 1048576 ]; then
+            error "Less than $((min_kb / 1024 / 1024)) GB free on $part"
+        else
+            error "Less than $((min_kb / 1024)) MB free on $part"
+        fi
+        return 1
+    fi
+    return 0
+}
+
+warn_low_partition_space() {
+    local part="$1" min_kb="$2"
+    local avail_kb
+
+    [ -d "$part" ] || return 0
+    avail_kb=$(get_avail_kb "$part")
+    if [ "$avail_kb" -lt "$min_kb" ]; then
+        warn "Very low space on $part (< $((min_kb / 1024)) MB). Kernel updates may fail."
+    fi
+}
+
+report_partition_space() {
+    local part="$1" min_kb="${2:-2097152}"
+    local avail_kb
+
+    [ -d "$part" ] || return 0
+    avail_kb=$(get_avail_kb "$part")
+    printf 'Disk space on %s: ' "$part"
+    if [ "$avail_kb" -ge "$min_kb" ]; then
+        printf 'OK (%s MB free)\n' "$((avail_kb / 1024))"
+    else
+        printf 'LOW (%s MB free)\n' "$((avail_kb / 1024))"
+    fi
+}
+
+calc_disk_freed_mb() {
+    local before="$1" after="$2"
+    local freed_kb=$((before - after))
+    awk "BEGIN {printf \"%.2f\", $freed_kb / 1024 }"
+}
+
+log_to_syslog() {
+    if command -v logger >/dev/null 2>&1; then
+        logger -t "$SCRIPT_NAME" -p user.info -- "$1"
+    fi
+}
+
 detect_distro() {
     if [ -f /etc/os-release ]; then
         # shellcheck source=/dev/null
@@ -113,6 +173,9 @@ detect_distro() {
         ubuntu)
             ARCHIVE_HOST="archive.ubuntu.com"
             ;;
+        kali)
+            ARCHIVE_HOST="archive.kali.org"
+            ;;
         *)
             ARCHIVE_HOST=""
             ;;
@@ -126,7 +189,7 @@ check_debian_based() {
     fi
 
     case "$DISTRO_ID" in
-        debian|ubuntu|linuxmint|pop|elementary|zorin|kubuntu|xubuntu|lubuntu|mint)
+        debian|ubuntu|kali|linuxmint|pop|elementary|zorin|kubuntu|xubuntu|lubuntu|mint)
             return 0
             ;;
         *)
@@ -184,35 +247,42 @@ find_running_kernel_pkg() {
 
 purge_kernel_related() {
     local pkg="$1"
-    local ver suffix candidate
+    local ver suffix candidate related
 
     if [[ "$pkg" =~ ^linux-image-(.+)$ ]]; then
         ver="${BASH_REMATCH[1]}"
-        for suffix in headers modules-extra modules; do
+        for suffix in headers modules-extra modules modules-unsigned; do
             candidate="linux-${suffix}-${ver}"
             if dpkg-query -W -f='${Status}' "$candidate" 2>/dev/null | grep -q 'install ok installed'; then
                 apt_run purge "$candidate" || true
             fi
         done
+        while IFS= read -r related; do
+            [ -z "$related" ] || [ "$related" = "$pkg" ] && continue
+            apt_run purge "$related" || true
+        done < <(
+            dpkg-query -W -f='${Package}\n' 2>/dev/null \
+                | grep -E '^linux-(headers|modules)' \
+                | grep -F -- "$ver" || true
+        )
     fi
 }
 
 apt_run() {
-    local args=("$@")
+    local -a args=("$@")
 
     if $DRY_RUN; then
-        info "DRY-RUN: apt-get ${args[*]}"
-        apt-get -s "${args[@]}" 2>&1 | tee -a "$APT_LOG" || true
+        info "DRY-RUN: would run: apt-get -y ${args[*]}"
         return 0
     fi
 
-    local cmd=(
+    local -a cmd=(
         apt-get
         -o Dpkg::Options::="--force-confdef"
         -o Dpkg::Options::="--force-confold"
         -y
+        "${args[@]}"
     )
-    cmd+=("${args[@]}")
 
     if ! DEBIAN_FRONTEND=noninteractive "${cmd[@]}" 2>&1 | tee -a "$APT_LOG"; then
         _record_failure
@@ -277,19 +347,82 @@ remove_old_kernels() {
 }
 
 show_dry_run_preview() {
-    info "DRY-RUN preview: upgradable packages"
+    info "DRY-RUN preview: upgradable packages (read-only)"
     apt list --upgradable 2>/dev/null | sed -n '1,40p' || true
-    info "DRY-RUN preview: autoremove simulation"
-    apt-get -s autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
+    info "DRY-RUN preview: autoremove simulation (read-only)"
+    apt-get -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
+}
+
+rotate_old_logs() {
+    local keep="$1" file count=0
+    [ "$keep" -le 0 ] && return
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        count=$((count + 1))
+        if [ "$count" -gt "$keep" ]; then
+            rm -f "$file"
+        fi
+    done < <(ls -1t "$LOG_DIR"/update-clean-*.log 2>/dev/null || true)
+}
+
+flatpak_update() {
+    if flatpak update --help 2>&1 | grep -q assumeyes; then
+        flatpak update --assumeyes "$@"
+    else
+        flatpak update -y "$@"
+    fi
+}
+
+flatpak_uninstall_unused() {
+    if flatpak uninstall --help 2>&1 | grep -q assumeyes; then
+        flatpak uninstall --unused --assumeyes "$@"
+    else
+        flatpak uninstall --unused -y "$@"
+    fi
+}
+
+remove_disabled_snaps() {
+    local name rev
+
+    if command -v jq >/dev/null 2>&1; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            name="${line%% *}"
+            rev="${line##* }"
+            snap remove "$name" --revision="$rev" 2>/dev/null || true
+        done < <(
+            snap list --all --format=json 2>/dev/null \
+                | jq -r '.[] | select(.notes[]? == "disabled") | "\(.name) \(.revision)"' 2>/dev/null || true
+        )
+        return
+    fi
+
+    while IFS= read -r name rev; do
+        [ -z "$name" ] && continue
+        snap remove "$name" --revision="$rev" 2>/dev/null || true
+    done < <(snap list --all 2>/dev/null | awk '$NF == "disabled" {print $1, $3}' || true)
 }
 
 hold_critical_packages() {
     local curpkg
+    local -a to_hold=()
+
     curpkg=$(find_running_kernel_pkg "$(uname -r)" || true)
-    if [ -n "$curpkg" ]; then
-        apt-mark hold base-files base-passwd bash coreutils util-linux "$curpkg" 2>/dev/null || true
-    else
-        apt-mark hold base-files base-passwd bash coreutils util-linux 2>/dev/null || true
+    to_hold=("${CRITICAL_PACKAGES[@]}")
+    [ -n "$curpkg" ] && to_hold+=("$curpkg")
+    [ "${#to_hold[@]}" -eq 0 ] && return 0
+    apt-mark hold "${to_hold[@]}" 2>/dev/null || true
+}
+
+send_completion_notification() {
+    local msg="$1"
+
+    if command -v notify-send >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
+        notify-send "Update & Cleanup" "$msg" 2>/dev/null || true
+    fi
+
+    if [ -n "${ADMIN_EMAIL:-}" ] && command -v mail >/dev/null 2>&1; then
+        printf '%s\n' "$msg" | mail -s "$SCRIPT_NAME completion" "$ADMIN_EMAIL" 2>/dev/null || true
     fi
 }
 
@@ -320,6 +453,7 @@ Usage: sudo $0 [options]
 Options:
   --dry-run         Simulate actions without making changes
   --no-kernel       Skip old kernel removal
+  --keep-kernels N  Keep N kernels besides running (default: 2)
   --last, --status  Show information from the last run
   --check, --doctor Run pre-flight checks only (no updates)
   --help, -h        Show this help
@@ -328,6 +462,9 @@ Options:
 Environment / Config:
   LOG_RETENTION     Number of logs to keep (default: 3)
   KERNEL_KEEP       Kernels to keep besides running (default: 2)
+  BACKUP_MODE       Backup /etc before purging configs (default: false)
+  ADMIN_EMAIL       Optional email address for completion notification
+  CRITICAL_PACKAGES Array of packages to hold during cleanup
 USAGE
 }
 
@@ -360,7 +497,6 @@ show_last_run() {
 }
 
 run_preflight_checks() {
-    local avail_kb
     detect_distro
     check_debian_based
 
@@ -382,15 +518,7 @@ run_preflight_checks() {
     fi
 
     for part in / /var /boot; do
-        if [ -d "$part" ]; then
-            avail_kb=$(get_avail_kb "$part")
-            printf 'Disk space on %s: ' "$part"
-            if [ "$avail_kb" -ge 2097152 ]; then
-                printf 'OK (%s MB free)\n' "$((avail_kb / 1024))"
-            else
-                printf 'LOW (%s MB free)\n' "$((avail_kb / 1024))"
-            fi
-        fi
+        report_partition_space "$part" 2097152
     done
 
     printf 'APT lock free: '
@@ -431,6 +559,15 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-kernel)
             SKIP_KERNEL=true
+            shift
+            ;;
+        --keep-kernels)
+            shift
+            if [ $# -eq 0 ]; then
+                error "--keep-kernels requires a number"
+                exit 1
+            fi
+            KERNEL_KEEP="$1"
             shift
             ;;
         --last|--status)
@@ -478,11 +615,10 @@ chmod 755 "$LOG_DIR"
 exec > >(tee >(sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE")) 2>&1
 
 log "Running $SCRIPT_NAME version: $SCRIPT_VERSION on $DISTRO_NAME"
+log_to_syslog "Running $SCRIPT_NAME version: $SCRIPT_VERSION on $DISTRO_NAME"
 
 log "Cleaning up old logs (keeping last $LOG_RETENTION)..."
-if [ "${LOG_RETENTION:-0}" -gt 0 ]; then
-    ls -1t "$LOG_DIR"/update-clean-*.log 2>/dev/null | tail -n +"$((LOG_RETENTION + 1))" | xargs -r rm -f --
-fi
+rotate_old_logs "${LOG_RETENTION:-0}"
 
 SCRIPT_START=$(date +%s)
 
@@ -507,21 +643,10 @@ if ! check_connectivity; then
 fi
 
 for partition in "/" "/var" "/boot"; do
-    if [ -d "$partition" ]; then
-        avail_kb=$(get_avail_kb "$partition")
-        if [ "$avail_kb" -lt 2097152 ]; then
-            error "Less than 2 GB free on $partition"
-            exit 1
-        fi
-    fi
+    check_partition_space "$partition" 2097152 || exit 1
 done
 
-if [ -d /boot ]; then
-    boot_kb=$(get_avail_kb /boot)
-    if [ "$boot_kb" -lt 51200 ]; then
-        warn "Very low space on /boot (< 50 MB). Kernel updates may fail."
-    fi
-fi
+warn_low_partition_space "/boot" 51200
 
 if fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
     warn "APT is locked by another process. Waiting up to 60s..."
@@ -565,7 +690,7 @@ cleanup() {
 }
 
 trap cleanup INT TERM EXIT
-trap '_record_failure; error "Unhandled error on line $LINENO"' ERR
+trap '_record_failure; error "Unhandled error on line $LINENO in ${FUNCNAME[0]:-main}"' ERR
 
 # ────────────────────────────────────────────────────────────────
 # Core update
@@ -616,7 +741,6 @@ hold_critical_packages
 
 if $DRY_RUN; then
     info "DRY-RUN: Would run autoremove, clean, purge configs, kernel removal, etc."
-    apt-get -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$APT_LOG" || true
 else
     info "Removing unnecessary packages (autoremove --purge)..."
     apt_run --purge autoremove || warn "autoremove had issues"
@@ -624,6 +748,13 @@ else
     info "Cleaning package cache (autoclean + clean)..."
     apt-get autoclean 2>&1 | tee -a "$APT_LOG" || _record_failure
     apt-get clean 2>&1 | tee -a "$APT_LOG" || _record_failure
+
+    if [ "${BACKUP_MODE}" = true ]; then
+        info "BACKUP_MODE: Creating backup of /etc before purging configs"
+        mkdir -p /var/backups
+        tar -czf "/var/backups/etc-before-cleanup-$(date +%Y%m%d-%H%M%S).tar.gz" /etc/ 2>/dev/null \
+            || warn "Backup of /etc failed"
+    fi
 
     info "Purging residual configuration files..."
     apt_run purge '~c' || warn "Purging residual configs had issues"
@@ -636,6 +767,14 @@ else
     remove_old_kernels
 fi
 
+if $KERNELS_REMOVED; then
+    if ! $DRY_RUN; then
+        info "Old kernels were removed. To recover: boot GRUB menu and select a previous kernel entry."
+    else
+        info "DRY-RUN: Would remove old kernels. Recovery: boot GRUB menu and select a previous kernel."
+    fi
+fi
+
 if $KERNELS_REMOVED && command -v update-grub >/dev/null 2>&1 && ! $DRY_RUN; then
     safe_run "Updating GRUB bootloader" update-grub
 fi
@@ -644,8 +783,8 @@ if command -v flatpak >/dev/null 2>&1; then
     if $DRY_RUN; then
         info "DRY-RUN: Would update Flatpaks and remove unused"
     else
-        safe_run "Updating Flatpaks" flatpak update -y
-        safe_run "Removing unused Flatpaks" flatpak uninstall --unused -y
+        safe_run "Updating Flatpaks" flatpak_update
+        safe_run "Removing unused Flatpaks" flatpak_uninstall_unused
     fi
 fi
 
@@ -654,10 +793,7 @@ if command -v snap >/dev/null 2>&1; then
         info "DRY-RUN: Would refresh Snaps and remove old revisions"
     else
         safe_run "Refreshing Snaps" snap refresh
-        snap list --all 2>/dev/null | awk '/disabled/ {print $1, $3}' | while read -r snapname revision; do
-            [ -z "$snapname" ] && continue
-            snap remove "$snapname" --revision="$revision" 2>/dev/null || true
-        done
+        remove_disabled_snaps
     fi
 fi
 
@@ -697,8 +833,7 @@ fi
 # Final status & summary
 # ────────────────────────────────────────────────────────────────
 AFTER=$(df / /var /boot --output=used 2>/dev/null | awk 'NR>1 {s+=$1} END {print s+0}')
-FREED_KB=$(( BEFORE - AFTER ))
-FREED_MB=$(awk "BEGIN {printf \"%.2f\", $FREED_KB / 1024 }")
+FREED_MB=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
 
 REBOOT_DURING_RUN=false
 if [ -f /var/run/reboot-required ]; then
@@ -743,16 +878,15 @@ elif $DRY_RUN; then
     info "DRY-RUN: Would check for services needing restart"
 fi
 
-if command -v notify-send >/dev/null 2>&1 && [ -n "${DISPLAY:-}" ]; then
-    MSG="System update completed. Freed ${FREED_MB} MB."
-    if [ "$REBOOT_DURING_RUN" = true ]; then
-        MSG="$MSG Reboot recommended."
-    fi
-    if [ "$EXIT_CODE" -ne 0 ]; then
-        MSG="$MSG Some steps reported failures."
-    fi
-    notify-send "Update & Cleanup" "$MSG" 2>/dev/null || true
+MSG="System update completed. Freed ${FREED_MB} MB."
+if [ "$REBOOT_DURING_RUN" = true ]; then
+    MSG="$MSG Reboot recommended."
 fi
+if [ "$EXIT_CODE" -ne 0 ]; then
+    MSG="$MSG Some steps reported failures."
+fi
+send_completion_notification "$MSG"
+log_to_syslog "$MSG (failures=$EXIT_CODE)"
 
 log "=== Update Summary ==="
 log "Distro: $DISTRO_NAME"

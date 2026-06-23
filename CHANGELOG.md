@@ -2,6 +2,37 @@
 
 All notable changes to this project are documented here.
 
+## [1.4.1] - 2026-06-22
+
+### Added
+- `check_partition_space()`, `warn_low_partition_space()`, and `report_partition_space()` helpers
+- `calc_disk_freed_mb()` for consistent disk-freed calculations
+- `log_to_syslog()` for optional syslog integration via `logger`
+- `send_completion_notification()` with desktop notify and optional `ADMIN_EMAIL` mail
+- Configurable `CRITICAL_PACKAGES` array for `hold_critical_packages()`
+- `BACKUP_MODE` option to tar `/etc` before purging residual configs
+- Kernel recovery hint when old kernels are removed
+
+### Changed
+- `apt_run()` uses explicit `local -a` arrays for arguments
+- ERR trap includes function name for better diagnostics
+- Script directory validated for readability at startup
+
+## [1.4.0] - 2026-06-22
+
+### Added
+- `--keep-kernels N` CLI flag to override `KERNEL_KEEP` at runtime
+- `show_dry_run_preview()` with read-only `apt list --upgradable` and autoremove simulation
+- Kali Linux in supported distro list with `archive.kali.org` connectivity checks
+- `flatpak_update()` / `flatpak_uninstall_unused()` with `--assumeyes` fallback
+- Snap cleanup via `snap list --all --format=json` when `jq` is available
+
+### Changed
+- `apt_run()` dry-run logs planned commands only (no `apt-get -s` simulation)
+- `purge_kernel_related()` also searches dpkg for packages sharing the kernel version string
+- `purge_kernel_related()` handles `modules-unsigned` suffix variant
+- Log rotation uses portable shell loop instead of `xargs -r`
+
 ## [1.3.0] - 2026-06-23
 
 ### Added

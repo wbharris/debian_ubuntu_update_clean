@@ -10,5 +10,14 @@
 # Kernels to keep in addition to the running kernel (default: 2)
 # KERNEL_KEEP=2
 
+# Backup /etc before purging residual configs (default: false)
+# BACKUP_MODE=true
+
+# Optional completion email (requires mail command)
+# ADMIN_EMAIL=admin@example.com
+
+# Packages to hold during cleanup (default: base-files base-passwd bash coreutils util-linux)
+# CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
+
 # Use --no-kernel on the command line to skip kernel cleanup entirely.
 # /etc/update-clean.conf must be owned by root when installed system-wide.
