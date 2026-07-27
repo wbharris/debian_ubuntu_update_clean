@@ -1,4 +1,7 @@
 # Optional configuration for update-clean.sh
+# Copyright (C) 2026 wbharris
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
 # Copy to one of:
 #   /etc/update-clean.conf
 #   ~/.config/update-clean.conf

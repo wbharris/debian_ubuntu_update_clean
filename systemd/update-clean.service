@@ -1,3 +1,6 @@
+# Copyright (C) 2026 wbharris
+# SPDX-License-Identifier: GPL-3.0-or-later
+
 [Unit]
 Description=System update and cleanup (update-clean)
 Documentation=https://github.com/wbharris/debian_ubuntu_update_clean

@@ -139,7 +139,16 @@ update-clean.sh          # main script
 VERSION                  # release version
 CHANGELOG.md             # change history
 README.md                # documentation
+LICENSE                  # GNU GPLv3
 update-clean.conf.example
 .github/workflows/       # CI (ShellCheck)
 systemd/                 # optional weekly timer
 ```
+
+### License
+
+Copyright (C) 2026 wbharris
+
+This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
+
+You may redistribute and/or modify it under the terms of the GPL as published by the Free Software Foundation. See the `LICENSE` file for the full text.
