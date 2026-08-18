@@ -140,7 +140,10 @@ update-clean.conf.example
 systemd/                 # optional weekly timer
 .github/workflows/       # ShellCheck + release
 scripts/package-release.sh
+tests/                   # Ubuntu 22.04 / 24.04 / Debian 12 harness
 ```
+
+`sudo ./tests/simulate_ubuntu.sh` bind-mounts fake `os-release` files (no Docker) and runs the real script. Last HTML report: `tests/last-results.html`.
 
 ## License
 

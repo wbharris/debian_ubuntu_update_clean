@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>update-clean last test — Ubuntu/Debian simulation</title>
+  <style>
+    body { font: 16px/1.45 system-ui, sans-serif; max-width: 52rem; margin: 2rem auto; padding: 0 1.25rem; }
+    h1 { font-size: 1.55rem; margin-bottom: 0.25rem; }
+    .meta { color: #555; margin-bottom: 1.25rem; }
+    .pass { color: #0a7a2f; font-weight: 700; }
+    table { border-collapse: collapse; width: 100%; margin: 1rem 0; }
+    th, td { border: 1px solid #ccc; padding: 0.4rem 0.55rem; text-align: left; }
+    th { background: #f3f3f3; }
+    pre { background: #111; color: #e8e8e8; padding: 1rem; overflow: auto; border-radius: 6px; font-size: 0.85rem; }
+    code { font-family: ui-monospace, Menlo, Consolas, monospace; }
+  </style>
+</head>
+<body>
+  <h1>Last test results</h1>
+  <p class="meta">
+    <strong>debian_ubuntu_update_clean 1.5.5</strong> · <code>tests/simulate_ubuntu.sh</code><br>
+    2026-08-18 · bind-mounted Ubuntu 22.04 / 24.04 and Debian 12 <code>os-release</code><br>
+    <span class="pass">25 passed, 0 failed</span>
+  </p>
+
+  <table>
+    <thead><tr><th>System</th><th>Case</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>Ubuntu 22.04</td><td><code>--version</code> reports Jammy</td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 24.04</td><td><code>--check --offline</code> uses archive.ubuntu.com</td><td class="pass">PASS</td></tr>
+      <tr><td>Debian 12</td><td><code>--check --offline</code> uses deb.debian.org</td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 22.04</td><td><code>--dry-run --offline --no-kernel</code></td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 24.04</td><td><code>--offline --check</code> order</td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 22.04</td><td>hidden <code>--keep-kernels 2</code> still works</td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 22.04</td><td><code>--last</code></td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 24.04</td><td>pre-existing reboot-required; dry-run does not reboot</td><td class="pass">PASS</td></tr>
+      <tr><td>Ubuntu 22.04</td><td>second instance lock → exit 1</td><td class="pass">PASS</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Harness log</h2>
+  <pre>=== Simulated Ubuntu/Debian systems (real update-clean.sh) ===
+
+  PASS  jammy --version exit (exit 0)
+  PASS  jammy pretty name
+  PASS  jammy version id
+  PASS  noble --check exit (exit 0)
+  PASS  noble distro
+  PASS  noble archive
+  PASS  noble tools
+  PASS  bookworm --check exit (exit 0)
+  PASS  bookworm distro
+  PASS  bookworm archive
+  PASS  jammy dry-run exit (exit 0)
+  PASS  jammy dry-run banner
+  PASS  jammy skip kernel
+  PASS  jammy would upgrade
+  PASS  jammy preview note
+  PASS  offline then check (exit 0)
+  PASS  offline skipped
+  PASS  keep-kernels compat (exit 0)
+  PASS  last exit (exit 0)
+  PASS  reboot-required dry-run exit (exit 0)
+  PASS  pre-existing reboot flag
+  PASS  reboot required warning
+  PASS  did not reboot
+  PASS  lock conflict exit (exit 1)
+  PASS  already running
+
+=== 25 passed, 0 failed ===</pre>
+
+  <p>Re-run: <code>sudo ./tests/simulate_ubuntu.sh</code></p>
+</body>
+</html>

@@ -18,3 +18,12 @@ jobs:
           scandir: '.'
           severity: error
           check_together: 'yes'
+
+      - name: bash -n syntax
+        run: |
+          bash -n update-clean.sh
+          bash -n tests/simulate_ubuntu.sh
+          bash -n tests/run_simulation.sh
+
+      - name: Simulated Ubuntu/Debian systems
+        run: sudo ./tests/simulate_ubuntu.sh

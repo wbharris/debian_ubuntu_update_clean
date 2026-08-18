@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.6] - 2026-08-18
+
+### Added
+- `tests/simulate_ubuntu.sh` — real-script harness for Ubuntu 22.04, Ubuntu 24.04, and Debian 12 via mount namespaces
+
 ## [1.5.5] - 2026-08-18
 
 ### Changed
