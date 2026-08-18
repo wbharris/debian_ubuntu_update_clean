@@ -76,8 +76,9 @@ Further keys (`LOG_DIR`, `LOCKFILE`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) ar
 ## Safety
 
 - Root required except `--check` / `--version` / `--last` / `--help`
-- Needs at least 2 GB free on `/`, `/var`, and `/boot` when those paths exist
-- Keeps the running kernel plus the `KERNEL_KEEP` newest other images
+- Needs at least 2 GB free on `/` and `/var`; `/boot` hard abort is 100 MB
+- Keeps the running kernel plus the `KERNEL_KEEP` newest other images. Recovery: GRUB → previous kernel
+- `--reboot-if-required` reboots if `/var/run/reboot-required` exists (including from a prior run)
 - Non-critical steps do not abort the run
 - The bundled timer does **not** pass `--reboot-if-required`
 

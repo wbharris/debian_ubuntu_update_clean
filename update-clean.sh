@@ -62,17 +62,27 @@ LOCKFILE="${LOCKFILE:-/run/update-clean.lock}"
 LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
-SCRIPT_VERSION=$(cat "$SCRIPT_DIR/VERSION" 2>/dev/null || echo "unknown")
+# Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
+readonly SCRIPT_VERSION_EMBEDDED="1.5.2"
+if [ -r "$SCRIPT_DIR/VERSION" ]; then
+    SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
+else
+    SCRIPT_VERSION=$SCRIPT_VERSION_EMBEDDED
+fi
 readonly SCRIPT_DIR
 EXIT_CODE=0
 KERNELS_REMOVED=false
 
 # Thresholds and retry limits (override via env if needed)
-readonly MIN_DISK_KB=${MIN_DISK_KB:-2097152}       # 2 GB
+readonly MIN_DISK_KB=${MIN_DISK_KB:-2097152}       # 2 GB on / and /var
 readonly MIN_LOG_DIR_KB=${MIN_LOG_DIR_KB:-1024}    # 1 MB
-readonly BOOT_MIN_KB=${BOOT_MIN_KB:-10240}         # 10 MB — skip kernel removal
+readonly BOOT_DISK_KB=${BOOT_DISK_KB:-102400}      # 100 MB hard abort on /boot
+readonly BOOT_MIN_KB=${BOOT_MIN_KB:-10240}         # 10 MB — skip kernel removal only
 readonly BOOT_LOW_KB=${BOOT_LOW_KB:-51200}         # 50 MB — low /boot warning
 readonly APT_UPDATE_MAX_RETRIES=${APT_UPDATE_MAX_RETRIES:-3}
+# Config may override these (not readonly)
+APT_LOCK_WAIT_SECS=${APT_LOCK_WAIT_SECS:-60}
+APT_LOCK_POLL_SECS=${APT_LOCK_POLL_SECS:-5}
 
 # CLI override markers (explicit flags win over config file)
 CLI_KERNEL_KEEP=""
@@ -84,6 +94,7 @@ CLI_DEBUG=false
 CLI_CHECK=false
 CLI_LAST=false
 CLI_SHOW_VERSION=false
+APT_LOCK_PROBE_WARNED=false
 
 # ────────────────────────────────────────────────────────────────
 # Colors (TTY-aware)
@@ -168,6 +179,14 @@ validate_config_values() {
     elif [ "$KERNEL_KEEP" -gt "$KERNEL_KEEP_MAX" ]; then
         warn "KERNEL_KEEP=$KERNEL_KEEP exceeds max $KERNEL_KEEP_MAX, using $KERNEL_KEEP_MAX"
         KERNEL_KEEP=$KERNEL_KEEP_MAX
+    fi
+    if ! [[ "${APT_LOCK_WAIT_SECS:-}" =~ ^[0-9]+$ ]]; then
+        warn "Invalid APT_LOCK_WAIT_SECS; using 60"
+        APT_LOCK_WAIT_SECS=60
+    fi
+    if ! [[ "${APT_LOCK_POLL_SECS:-}" =~ ^[0-9]+$ ]] || [ "${APT_LOCK_POLL_SECS:-0}" -lt 1 ]; then
+        warn "Invalid APT_LOCK_POLL_SECS; using 5"
+        APT_LOCK_POLL_SECS=5
     fi
 }
 
@@ -255,7 +274,9 @@ log_to_syslog() {
 }
 
 dump_debug_state() {
-    $DEBUG || return
+    if ! $DEBUG; then
+        return 0
+    fi
     printf 'DEBUG STATE:\n'
     printf '  KERNEL_KEEP=%s SKIP_KERNEL=%s DRY_RUN=%s DEBUG=%s\n' \
         "${KERNEL_KEEP:-}" "${SKIP_KERNEL:-}" "${DRY_RUN:-}" "${DEBUG:-}"
@@ -274,9 +295,9 @@ format_cmd_args() {
     printf '%s' "${out%" "}"
 }
 
-# is_apt_locked: returns 0 if an apt/dpkg lock is held, 1 if unlocked.
-# (Return 0 means "locked" — inverted from typical "success = free" wording.)
-is_apt_locked() {
+# apt_lock_held: 0 = a live holder exists, 1 = free or unknown.
+# Without fuser/lsof, leftover lock files are not treated as held.
+apt_lock_held() {
     local locks=(
         /var/lib/dpkg/lock-frontend
         /var/lib/dpkg/lock
@@ -303,13 +324,15 @@ is_apt_locked() {
         return 1
     fi
 
-    for lock in "${locks[@]}"; do
-        if [ -e "$lock" ]; then
-            return 0
-        fi
-    done
+    if ! ${APT_LOCK_PROBE_WARNED:-false}; then
+        warn "Cannot probe APT lock holders (install psmisc or lsof); treating locks as unknown, not held"
+        APT_LOCK_PROBE_WARNED=true
+    fi
     return 1
 }
+
+# Backward-compatible alias (same convention: 0 = held).
+is_apt_locked() { apt_lock_held; }
 
 list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
@@ -317,7 +340,9 @@ list_installed_kernel_images() {
         | grep -E '^linux-image(-unsigned)?-[0-9][0-9a-zA-Z.\-+]*' \
         | grep -Ev -- '-(meta|dbg|dbgsym|rt|cloud|kvm|virtual)$' \
         | grep -Ev 'linux-image-(generic|generic-hwe|amd64)(-lts|-hwe)?$' \
-        | sort -V
+        | sort -V \
+        || true
+    # sort -V: oldest first. Callers keep the last KERNEL_KEEP extras.
 }
 
 create_etc_backup() {
@@ -377,8 +402,8 @@ detect_distro() {
 }
 
 check_debian_based() {
-    if ! has_cmd apt; then
-        error "This script requires apt and is intended for Debian-based systems."
+    if ! has_cmd apt-get && ! has_cmd apt; then
+        error "This script requires apt-get (or apt) and is intended for Debian-based systems."
         exit 1
     fi
 
@@ -521,14 +546,14 @@ apt_get_update_with_retries() {
 }
 
 remove_old_kernels() {
-    local -a kernels=()
-    local -a to_remove=()
-    local running_pkg running_ver pkg delcount boot_kb keep
+    local -a kernels=() extras=() keepers=() to_remove=()
+    local running_pkg running_ver pkg boot_kb keep n
 
     if [ -d /boot ]; then
         boot_kb=$(get_avail_kb /boot)
         if [ "$boot_kb" -lt "$BOOT_MIN_KB" ]; then
-            warn "Skipping kernel removal: /boot has less than $((BOOT_MIN_KB / 1024)) MB free"
+            warn "Skipping kernel purge only: /boot has ${boot_kb} KB free (need >= $((BOOT_MIN_KB / 1024)) MB)"
+            warn "The rest of the update continues. Recovery: GRUB → previous kernel"
             return 0
         fi
     fi
@@ -540,8 +565,9 @@ remove_old_kernels() {
 
     if [ -n "$running_pkg" ]; then
         info "Running kernel package: $running_pkg ($running_ver)"
-    elif [ -n "$running_ver" ]; then
-        warn "Could not match installed package for running kernel $running_ver; skipping kernel removal"
+    else
+        warn "Could not map running kernel (uname -r=${running_ver:-unknown}) to a linux-image package"
+        warn "Skipping kernel purge so the booted kernel cannot be removed by mistake"
         return 0
     fi
 
@@ -557,29 +583,35 @@ remove_old_kernels() {
         if [ -n "$running_ver" ] && [[ "$pkg" == *"$running_ver"* ]]; then
             continue
         fi
-        to_remove+=("$pkg")
+        extras+=("$pkg")
     done
 
     keep="${KERNEL_KEEP:-2}"
+    n=${#extras[@]}
 
-    if [ "${#to_remove[@]}" -le "$keep" ]; then
-        info "No old kernels to remove (keeping $keep beside running kernel)."
+    if [ "$n" -le "$keep" ]; then
+        info "No old kernels to remove (extras=$n, keep $keep newest besides running)."
         return 0
     fi
 
-    delcount=$(( ${#to_remove[@]} - keep ))
-    if [ "$delcount" -lt 1 ] || [ "$delcount" -gt "${#to_remove[@]}" ]; then
-        warn "Kernel removal count out of range; skipping removal"
+    keepers=("${extras[@]:$((n - keep)):$keep}")
+    to_remove=("${extras[@]:0:$((n - keep))}")
+
+    if [ "${#to_remove[@]}" -lt 1 ]; then
         return 0
     fi
     KERNELS_REMOVED=true
 
-    info "Kernels scheduled for removal ($delcount):"
-    for pkg in "${to_remove[@]:0:delcount}"; do
+    info "Keeping running + ${#keepers[@]} newest extra kernel(s):"
+    for pkg in "${keepers[@]}"; do
+        info "  keep $pkg"
+    done
+    info "Kernels scheduled for removal (${#to_remove[@]} oldest):"
+    for pkg in "${to_remove[@]}"; do
         info "  $pkg"
     done
 
-    for pkg in "${to_remove[@]:0:delcount}"; do
+    for pkg in "${to_remove[@]}"; do
         if $DRY_RUN; then
             info "DRY-RUN: Would purge old kernel: $pkg"
             continue
@@ -593,9 +625,9 @@ remove_old_kernels() {
 show_dry_run_preview() {
     local apt_log="${APT_LOG:-/dev/null}"
 
-    info "DRY-RUN preview: upgradable packages (read-only)"
-    apt list --upgradable 2>/dev/null | sed -n '1,40p' || true
-    info "DRY-RUN preview: autoremove simulation (read-only)"
+    info "DRY-RUN preview: upgradable packages (first 40 lines; full list in $apt_log)"
+    apt-get -s upgrade 2>/dev/null | sed -n '1,40p' | tee -a "$apt_log" || true
+    info "DRY-RUN preview: autoremove simulation (first 40 lines; full list in $apt_log)"
     apt-get -s --purge autoremove 2>&1 | sed -n '1,40p' | tee -a "$apt_log" || true
 }
 
@@ -670,7 +702,10 @@ hold_critical_packages() {
     to_hold=("${CRITICAL_PACKAGES[@]}")
     [ -n "$curpkg" ] && to_hold+=("$curpkg")
     [ "${#to_hold[@]}" -eq 0 ] && return 0
-    apt-mark hold "${to_hold[@]}" 2>/dev/null || true
+    if ! apt-mark hold "${to_hold[@]}" 2>&1 | tee -a "${APT_LOG:-/dev/null}"; then
+        warn "apt-mark hold failed — critical packages may not be protected from autoremove"
+        _record_failure
+    fi
 }
 
 send_completion_notification() {
@@ -783,14 +818,15 @@ run_preflight_checks() {
         printf '%s\n' "FAIL"
     fi
 
-    for part in / /var /boot; do
+    for part in / /var; do
         report_partition_space "$part" "$MIN_DISK_KB"
     done
+    report_partition_space /boot "${BOOT_DISK_KB:-102400}"
 
     printf 'APT lock free: '
     if ! has_cmd fuser; then
         printf '%s\n' "UNKNOWN (fuser not installed)"
-    elif is_apt_locked; then
+    elif apt_lock_held; then
         printf '%s\n' "LOCKED"
     else
         printf '%s\n' "OK"
@@ -978,24 +1014,25 @@ else
     fi
 fi
 
-for partition in "/" "/var" "/boot"; do
+for partition in "/" "/var"; do
     check_partition_space "$partition" "$MIN_DISK_KB" || exit 1
 done
+check_partition_space "/boot" "${BOOT_DISK_KB:-102400}" || exit 1
 
 warn_low_partition_space "/boot" "$BOOT_LOW_KB"
 
-if is_apt_locked; then
-    warn "APT is locked by another process. Waiting up to 60s..."
-    for _ in {1..12}; do
-        if ! is_apt_locked; then
-            break
-        fi
-        sleep 5
+if apt_lock_held; then
+    warn "APT is locked by another process. Waiting up to ${APT_LOCK_WAIT_SECS}s..."
+    _apt_waited=0
+    while apt_lock_held && [ "$_apt_waited" -lt "$APT_LOCK_WAIT_SECS" ]; do
+        sleep "$APT_LOCK_POLL_SECS"
+        _apt_waited=$((_apt_waited + APT_LOCK_POLL_SECS))
     done
-    if is_apt_locked; then
-        error "APT still locked after waiting. Please resolve and try again."
+    if apt_lock_held; then
+        error "APT still locked after ${APT_LOCK_WAIT_SECS}s. Please resolve and try again."
         exit 1
     fi
+    info "APT lock released after ${_apt_waited}s"
 fi
 
 if ! check_systemd_resolved; then
@@ -1078,11 +1115,11 @@ fi
 info "Upgrading packages..."
 apt_run upgrade || warn "apt upgrade had issues"
 
-info "Listing upgradable packages after initial upgrade:"
-apt list --upgradable 2>/dev/null || true
-
 if $DRY_RUN; then
     show_dry_run_preview
+else
+    info "Remaining upgrades after initial upgrade (apt-get -s upgrade, read-only):"
+    apt-get -s upgrade 2>/dev/null | sed -n '1,40p' || true
 fi
 
 info "Performing full system upgrade..."
@@ -1116,13 +1153,13 @@ fi
 if $SKIP_KERNEL; then
     info "Skipping old kernel removal (--no-kernel)."
 else
-    info "Removing old kernels (keeping current + previous)..."
+    info "Removing old kernels (keeping running + ${KERNEL_KEEP} newest extras)..."
     remove_old_kernels
 fi
 
 if $KERNELS_REMOVED; then
     if ! $DRY_RUN; then
-        info "Old kernels were removed. To recover: boot GRUB menu and select a previous kernel entry."
+        info "Old kernels were removed. Recovery: reboot, open the GRUB menu, pick a previous kernel."
     else
         info "DRY-RUN: Would remove old kernels. Recovery: boot GRUB menu and select a previous kernel."
     fi
@@ -1190,14 +1227,17 @@ fi
 AFTER=$(get_used_kb_for_paths / /var /boot)
 FREED_MB=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
 
-REBOOT_DURING_RUN=false
+REBOOT_REQUIRED_NOW=false
 if [ -f /var/run/reboot-required ]; then
+    REBOOT_REQUIRED_NOW=true
     if [ "$(stat -c %Y /var/run/reboot-required 2>/dev/null || echo 0)" -gt "$SCRIPT_START" ]; then
-        REBOOT_DURING_RUN=true
+        info "This run set /var/run/reboot-required"
+    else
+        info "/var/run/reboot-required was already present before this run"
     fi
 fi
 
-if [ "$REBOOT_DURING_RUN" = true ]; then
+if [ "$REBOOT_REQUIRED_NOW" = true ]; then
     warn "Reboot is required to complete some updates."
     if [ "${REBOOT_IF_REQUIRED}" = true ] && ! $DRY_RUN; then
         info "REBOOT_IF_REQUIRED set; rebooting now"
@@ -1217,7 +1257,7 @@ RUN_STATUS=success
 if ! $DRY_RUN; then
     mkdir -p "$LAST_RUN_DIR"
     RUN_TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-    REBOOT_FLAG=$([ "$REBOOT_DURING_RUN" = true ] && echo "yes" || echo "no")
+    REBOOT_FLAG=$([ "$REBOOT_REQUIRED_NOW" = true ] && echo "yes" || echo "no")
     cat > "$LAST_RUN_FILE" << LAST
 VERSION=$SCRIPT_VERSION
 DISTRO=$DISTRO_NAME
@@ -1254,8 +1294,8 @@ elif $DRY_RUN; then
     info "DRY-RUN: Would check for services needing restart"
 fi
 
-MSG="System update completed. Freed ${FREED_MB} MB."
-if [ "$REBOOT_DURING_RUN" = true ]; then
+MSG="System update completed. Freed ${FREED_MB} MB on /, /var, /boot."
+if [ "$REBOOT_REQUIRED_NOW" = true ]; then
     MSG="$MSG Reboot recommended."
 fi
 if [ "$EXIT_CODE" -ne 0 ]; then
@@ -1266,7 +1306,7 @@ log_to_syslog "$MSG (failures=$EXIT_CODE)"
 
 log "=== Update Summary ==="
 log "Distro: $DISTRO_NAME"
-log "Disk space freed (/, /var, /boot): ${FREED_MB} MB"
+log "Disk space change on tracked mounts (/, /var, /boot): ${FREED_MB} MB"
 log "Failures recorded: $EXIT_CODE"
 log "Full log saved to: $LOG_FILE"
 log "APT warnings logged to: $APT_LOG"

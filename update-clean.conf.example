@@ -21,8 +21,14 @@
 # Backup /etc before purging residual configs (default: false)
 # BACKUP_MODE=true
 
-# Reboot automatically when /var/run/reboot-required is set (default: false)
-# REBOOT_IF_REQUIRED=true
+# Reboot automatically when /var/run/reboot-required exists (default: false)
+# Honors a file left by an earlier update, not only this run
+# REBOOT_IF_REQUIRED=false
+
+# APT lock wait (seconds). 0 = fail immediately if locked.
+# Install psmisc (fuser) or lsof to detect live holders.
+# APT_LOCK_WAIT_SECS=60
+# APT_LOCK_POLL_SECS=5
 
 # Optional completion email (requires mail command)
 # ADMIN_EMAIL=admin@example.com

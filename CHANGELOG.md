@@ -2,6 +2,21 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.2] - 2026-08-18
+
+### Fixed
+- `--reboot-if-required` honors an existing `/var/run/reboot-required` (not only files created during this run)
+- APT lock wait is configurable (`APT_LOCK_WAIT_SECS` / `APT_LOCK_POLL_SECS`) and leftover lock files are not treated as held without `fuser`/`lsof`
+- `apt-mark hold` failures are logged (no longer silent)
+- Kernel purge keeps the newest `KERNEL_KEEP` extras; skip if the running kernel cannot be mapped
+- `dump_debug_state` no longer aborts under `set -e` when debug is off
+- `--version` works after a single-file install (embedded version)
+
+### Changed
+- Preferred lock helper is `apt_lock_held` (`is_apt_locked` kept as an alias)
+- `/boot` hard abort is 100 MB; 2 GB still applies to `/` and `/var`
+- Dry-run previews use `apt-get -s` and say they show the first 40 lines
+
 ## [1.5.1] - 2026-08-18
 
 ### Changed
