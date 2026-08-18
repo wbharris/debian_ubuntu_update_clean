@@ -12,6 +12,7 @@ Type=oneshot
 ExecStart=/usr/local/sbin/update-clean.sh
 Nice=10
 IOSchedulingClass=best-effort
+# Do not auto-reboot from the unit; set REBOOT_IF_REQUIRED in config only if you mean it
 
 [Install]
 WantedBy=multi-user.target

@@ -22,7 +22,7 @@
 # Logs: /var/log/update-clean/ (retention via LOG_RETENTION)
 # Exit codes: 0 = success; 1 = one or more failures (count in FAILURES / EXIT_CODE)
 #
-# Usage: sudo ./update-clean.sh [--dry-run] [--check] [--help] [--version]
+# Usage: sudo ./update-clean.sh [--dry-run] [--check] [--last] [--help] [--version]
 # Recommended: run weekly
 
 set -euo pipefail

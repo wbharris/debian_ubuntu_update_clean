@@ -30,5 +30,8 @@
 # Packages to hold during cleanup (default: base-files base-passwd bash coreutils util-linux)
 # CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 
-# Use --no-kernel on the command line to skip kernel cleanup entirely.
+# One-shot CLI overrides (not extra config keys):
+#   --no-kernel            skip kernel cleanup for this run
+#   --reboot-if-required   reboot if /var/run/reboot-required is set
+#   --offline              skip the network check
 # /etc/update-clean.conf must be owned by root when installed system-wide.

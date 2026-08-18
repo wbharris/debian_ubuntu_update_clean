@@ -1,42 +1,20 @@
 # debian_ubuntu_update_clean
 
-One clean update and cleanup script for **Debian** and **Ubuntu** (and other apt-based derivatives).
+One **update and cleanup** script for **Debian** and **Ubuntu** (and other apt-based derivatives).
 
-**Version:** See the `VERSION` file (or run `./update-clean.sh --version`)
+**Version:** `VERSION` file, or `./update-clean.sh --version`. See `CHANGELOG.md` for history.
 
-## Main Script
+For Ubuntu AI / GPU compute blades, see [`ai_blade_ubuntu_update_clean`](https://github.com/wbharris/ai_blade_ubuntu_update_clean).
 
-**`update-clean.sh`** — Complete system update and cleanup.
+## What it does
 
-### What it does
+**Update:** fix interrupted installs, then `apt-get update` / `upgrade` / `full-upgrade` and `apt-get check`. Mutating work uses **`apt-get`**, not `apt(8)`.
 
-**Update:**
-- Fixes interrupted installs and broken packages
-- `apt-get update` / `upgrade` / `full-upgrade`
-- Package cache check (`apt-get check`)
+**Cleanup:** purge autoremove, autoclean, residual configs, old kernels (running + the `KERNEL_KEEP` newest extras), Snap/Flatpak when present, `fwupd` when installed, journal vacuum, partial apt lists, man/locate DBs, GRUB after kernel changes.
 
-**Cleanup:**
-- `apt-get --purge autoremove`, `autoclean`, `clean`
-- Purge residual config files (`apt-get purge '~c'`)
-- Remove old kernels (running + `KERNEL_KEEP` newest extras)
-- Remove old snap revisions
-- Update + remove unused Flatpaks
-- Firmware updates (`fwupdmgr`)
-- Vacuum journal logs (last 30 days)
-- Clean partial apt lists
-- Update locate database (if present)
-- Rebuild man database
-- Update GRUB after kernel changes
+**Also:** Debian vs Ubuntu archive host for connectivity, disk change on `/` `/var` `/boot`, log rotation, last-run record, root / disk / APT-lock checks.
 
-**Other:**
-- Detects Debian vs Ubuntu for connectivity checks
-- Tracks disk usage before/after (across `/`, `/var`, `/boot`)
-- Keeps only the last **3** log files
-- Color output + clear logging
-- Records last run details in `/var/lib/update-clean/last-run`
-- Safety checks (root, internet, disk space, APT lock)
-
-### Usage
+## Usage
 
 ```bash
 sudo ./update-clean.sh
@@ -51,97 +29,95 @@ sudo ./update-clean.sh --reboot-if-required
 sudo ./update-clean.sh --offline
 ```
 
-Kernel keep count and similar knobs live in the config file (below), not as extra flags.
+`--dry-run` skips `apt-get update` and logs planned apt commands. It may still use the network for read-only listings.
 
-**Dry-run:** skips `apt-get update` and logs planned `apt-get` commands. It may still use the network for read-only listings.
+Kernel keep count, log retention, and similar knobs live in the config file, not as extra flags. See `update-clean.conf.example`.
 
-Run periodically (recommended weekly).
+Requires **Bash 4+** (`#!/usr/bin/env bash`). Do not run under `/bin/sh`.
 
-### Configuration
+Run weekly. Prefer a maintenance window if you use `--reboot-if-required`.
 
-Optional config files (sourced in order if present):
+## Configuration
+
+Sourced in order if present:
 
 - `/etc/update-clean.conf` (must be root-owned)
-- When run as root: `/root/.config/update-clean.conf`, `/root/.update-clean.conf`
-- When run via `sudo`: also the invoking user's `~/.config/update-clean.conf` and `~/.update-clean.conf`
-- When run as a normal user: `$HOME/.config/update-clean.conf`, `$HOME/.update-clean.conf`
-
-Example:
+- As root: `/root/.config/update-clean.conf`, `/root/.update-clean.conf`
+- Via `sudo`: also the invoking user's `~/.config/update-clean.conf` and `~/.update-clean.conf`
+- As a normal user: `$HOME/.config/update-clean.conf`, `$HOME/.update-clean.conf`
 
 ```bash
 KERNEL_KEEP=2
-BACKUP_MODE=true
+BACKUP_MODE=false
 REBOOT_IF_REQUIRED=false
 ```
 
-**Config security:** `/etc/update-clean.conf` must be owned by root (non-root-owned system config is skipped). User-level configs are sourced without ownership checks — only use configs you trust.
+`/etc/update-clean.conf` must be owned by root. User-level configs are sourced without ownership checks — only use files you trust.
 
-**Precedence:** Config files load after CLI parsing; explicit flags (`--dry-run`, `--no-kernel`, …) override config values.
+Config loads after CLI parsing; explicit flags win.
 
-**KERNEL_KEEP:** newest extra kernels to keep besides the running one (default: 2). Set in config, not a public flag.
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `KERNEL_KEEP` | `2` | Newest extra kernels besides the running one (oldest extras are purged) |
+| `BACKUP_MODE` | `false` | Tar `/etc` before purging residual configs (excludes `/etc/ssl/private`) |
+| `REBOOT_IF_REQUIRED` | `false` | Auto-reboot when `/var/run/reboot-required` is set |
+| `LOG_RETENTION` | `3` | Log files to keep under `/var/log/update-clean` |
 
-**BACKUP_MODE:** when `true`, creates a `/var/backups/etc-before-cleanup-*.tar.gz` archive before purging residual config packages (excludes `/etc/ssl/private`, stays on local filesystem).
+Further keys (`LOG_DIR`, `LOCKFILE`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) are in `update-clean.conf.example`.
 
-### Logging & Records
+## Logging
 
-- Detailed logs: `/var/log/update-clean/`
-- Only the most recent 3 logs are kept automatically
-- Last run record: `/var/lib/update-clean/last-run` (includes `STATUS`, `FAILURES`, and `LOG_FILE`)
-- Machine-readable summary: `/var/lib/update-clean/last-run.json` (when `jq` is installed)
-- `sudo ./update-clean.sh --last` shows the record plus the last 80 lines of the log
+- Logs: `/var/log/update-clean/` (retention via `LOG_RETENTION`)
+- Last run: `/var/lib/update-clean/last-run`
+- JSON (when `jq` is installed): `/var/lib/update-clean/last-run.json`
+- `sudo ./update-clean.sh --last` prints the record and the last 80 log lines
+- Disk-freed figure is `df` on `/`, `/var`, `/boot` only
 
-### Safety
+## Safety
 
-- Must run as root except `--check` / `--version` / `--last` / `--help`
-- Requires at least 2 GB free on `/` (and `/var` / `/boot` when present)
-- Keeps the running kernel plus `KERNEL_KEEP` newest extras
-- Non-critical steps will not stop the script
+- Root required except `--check` / `--version` / `--last` / `--help`
+- Needs at least 2 GB free on `/`, `/var`, and `/boot` when those paths exist
+- Keeps the running kernel plus the `KERNEL_KEEP` newest other images
+- Non-critical steps do not abort the run
+- The bundled timer does **not** pass `--reboot-if-required`
 
-### Scheduling
+## Scheduling
 
-**Cron example (weekly):**
+Weekly, Sunday 04:00:
 
 ```bash
-0 4 * * 0 /path/to/update-clean.sh
+0 4 * * 0 /usr/local/sbin/update-clean.sh
 ```
 
-Or use the included systemd timer:
+Or the bundled timer:
 
 ```bash
+sudo install -m 755 update-clean.sh /usr/local/sbin/update-clean.sh
 sudo cp systemd/update-clean.service systemd/update-clean.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now update-clean.timer
 ```
 
-### Supported systems
+## Supported systems
 
-- Debian (stable, testing, unstable)
-- Ubuntu (LTS and interim releases)
-- Kali Linux and other apt-based derivatives (Mint, Pop!_OS, etc.) — may work but are not all explicitly tested
+Debian (stable, testing, unstable), Ubuntu (LTS and interim), and other apt-based derivatives (Kali, Mint, Pop!_OS, …). Not all derivatives are tested.
 
-### Versioning
-
-- Version is in the `VERSION` file
-- Script supports `--version`
-- See `CHANGELOG.md` for history
-
-### Repository layout
+| Repo | Focus |
+|------|--------|
+| `update_clean` | Kali |
+| **`debian_ubuntu_update_clean`** | General Debian/Ubuntu |
+| `ai_blade_ubuntu_update_clean` | Ubuntu AI / GPU blades |
 
 ```
-update-clean.sh          # main script
-VERSION                  # release version
-CHANGELOG.md             # change history
-README.md                # documentation
-LICENSE                  # GNU GPLv3
+update-clean.sh
+VERSION / CHANGELOG.md / README.md / LICENSE
 update-clean.conf.example
-.github/workflows/       # CI (ShellCheck)
 systemd/                 # optional weekly timer
+.github/workflows/       # ShellCheck
 ```
 
-### License
+## License
 
 Copyright (C) 2026 wbharris
 
-This project is licensed under the [GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).
-
-You may redistribute and/or modify it under the terms of the GPL as published by the Free Software Foundation. See the `LICENSE` file for the full text.
+[GNU General Public License v3.0 or later](LICENSE) (GPL-3.0-or-later).

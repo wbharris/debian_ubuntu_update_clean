@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.1] - 2026-08-18
+
+### Changed
+- README and example config match the 1.5.0 CLI: everyday flags only, `apt-get`, `KERNEL_KEEP` as newest extras
+- systemd unit notes that the timer does not auto-reboot
+
 ## [1.5.0] - 2026-08-18
 
 ### Changed
