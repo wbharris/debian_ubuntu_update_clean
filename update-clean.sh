@@ -63,7 +63,7 @@ LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.2"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.3"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -163,6 +163,15 @@ load_config_files() {
             warn "Config $conf is not readable; skipping"
             continue
         fi
+        if [ -n "$(find "$conf" -maxdepth 0 -perm -002 2>/dev/null)" ]; then
+            warn "Config $conf is world-writable; skipping"
+            continue
+        fi
+        if ! bash -n "$conf" 2>/dev/null; then
+            warn "Config $conf failed bash -n syntax check; skipping"
+            continue
+        fi
+        info "Loading config: $conf"
         # shellcheck source=/dev/null
         source "$conf"
     done
@@ -321,6 +330,22 @@ apt_lock_held() {
                 return 0
             fi
         done
+        return 1
+    fi
+
+    # Last resort: live package-manager processes (no lock-file probe).
+    if has_cmd pgrep; then
+        if pgrep -x apt-get >/dev/null 2>&1 \
+            || pgrep -x apt >/dev/null 2>&1 \
+            || pgrep -x dpkg >/dev/null 2>&1 \
+            || pgrep -x aptitude >/dev/null 2>&1 \
+            || pgrep -x unattended-upgrades >/dev/null 2>&1; then
+            return 0
+        fi
+        if ! ${APT_LOCK_PROBE_WARNED:-false}; then
+            warn "No fuser/lsof; used process names to probe APT (install psmisc or lsof for lock-file PIDs)"
+            APT_LOCK_PROBE_WARNED=true
+        fi
         return 1
     fi
 
@@ -680,6 +705,9 @@ remove_disabled_snaps() {
             [ -z "$line" ] && continue
             name="${line%% *}"
             rev="${line##* }"
+            if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || ! [[ "$rev" =~ ^[0-9]+$ ]]; then
+                continue
+            fi
             snap remove "$name" --revision="$rev" 2>/dev/null || true
         done < <(
             snap list --all --format=json 2>/dev/null \
@@ -688,8 +716,13 @@ remove_disabled_snaps() {
         return
     fi
 
+    info "jq not installed — parsing snap list columns (prefer installing jq)"
     while IFS= read -r name rev; do
         [ -z "$name" ] && continue
+        if ! [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || ! [[ "$rev" =~ ^[0-9]+$ ]]; then
+            warn "Skipping snap line with unexpected fields: name='$name' rev='$rev'"
+            continue
+        fi
         snap remove "$name" --revision="$rev" 2>/dev/null || true
     done < <(snap list --all 2>/dev/null | awk '$NF == "disabled" {print $1, $3}' || true)
 }
@@ -1226,6 +1259,9 @@ fi
 # ────────────────────────────────────────────────────────────────
 AFTER=$(get_used_kb_for_paths / /var /boot)
 FREED_MB=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
+if ! $DRY_RUN && [ "$AFTER" -gt "$BEFORE" ]; then
+    warn "Used space on /, /var, /boot increased during this run (logs or other growth)"
+fi
 
 REBOOT_REQUIRED_NOW=false
 if [ -f /var/run/reboot-required ]; then
@@ -1288,10 +1324,10 @@ else
 fi
 
 if has_cmd needrestart && ! $DRY_RUN; then
-    info "Checking services that need restart..."
+    info "Checking services that need restart (advisory only — this script does not restart them)"
     needrestart -r a -l 2>/dev/null || true
 elif $DRY_RUN; then
-    info "DRY-RUN: Would check for services needing restart"
+    info "DRY-RUN: Would list services needing restart (needrestart is advisory only)"
 fi
 
 MSG="System update completed. Freed ${FREED_MB} MB on /, /var, /boot."

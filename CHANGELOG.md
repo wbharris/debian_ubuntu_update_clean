@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.3] - 2026-08-18
+
+### Fixed / hardened
+- Skip world-writable configs and `bash -n` them before `source`
+- APT lock fallback: `pgrep` for apt-get/apt/dpkg when fuser/lsof are missing
+- Snap disable-removal validates name/revision fields (column parse is last resort)
+- Warn if used space on `/` `/var` `/boot` increased during the run
+- `needrestart` is documented as advisory only (no auto-restart)
+
 ## [1.5.2] - 2026-08-18
 
 ### Fixed

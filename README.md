@@ -75,7 +75,7 @@ BACKUP_MODE=false
 REBOOT_IF_REQUIRED=false
 ```
 
-`/etc/update-clean.conf` must be owned by root. User-level configs are sourced without ownership checks — only use files you trust.
+`/etc/update-clean.conf` must be owned by root. World-writable configs are skipped. User-level configs are still only as trustworthy as the account that wrote them.
 
 Config loads after CLI parsing; explicit flags win.
 
@@ -94,7 +94,8 @@ Further keys (`LOG_DIR`, `LOCKFILE`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) ar
 - Last run: `/var/lib/update-clean/last-run`
 - JSON (when `jq` is installed): `/var/lib/update-clean/last-run.json`
 - `sudo ./update-clean.sh --last` prints the record and the last 80 log lines
-- Disk-freed figure is `df` on `/`, `/var`, `/boot` only
+- Disk-freed figure is `df` on `/`, `/var`, `/boot` only (warns if used space grew)
+- `needrestart` (if installed) only **lists** services that need a restart; this script does not restart them
 
 ## Safety
 
