@@ -6,6 +6,7 @@ All notable changes to this project are documented here.
 
 ### Added
 - `tests/simulate_ubuntu.sh` — real-script harness for Ubuntu 22.04, Ubuntu 24.04, and Debian 12 via mount namespaces
+- GitHub Release assets: versioned tarball plus `debian_ubuntu_update_clean.tar.gz` for `/releases/latest/download/`
 
 ## [1.5.5] - 2026-08-18
 

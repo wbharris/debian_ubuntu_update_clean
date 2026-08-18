@@ -37,7 +37,10 @@
 # CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 
 # One-shot CLI overrides (not extra config keys):
+#   --dry-run              plan only
+#   --check                pre-flight only
+#   --last                 show last run
 #   --no-kernel            skip kernel cleanup for this run
-#   --reboot-if-required   reboot if /var/run/reboot-required is set
+#   --reboot-if-required   reboot if /var/run/reboot-required exists
 #   --offline              skip the network check
 # /etc/update-clean.conf must be owned by root when installed system-wide.

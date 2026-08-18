@@ -60,6 +60,15 @@ sudo install -m 755 update-clean.sh /usr/local/sbin/update-clean.sh
 
 Run weekly. Prefer a maintenance window if you use `--reboot-if-required`.
 
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | One or more steps failed (`FAILURES` in the last-run record) |
+
+Inspect modes (`--check`, `--last`, `--version`) do not take the instance lock.
+
 ## Configuration
 
 Sourced in order if present:
@@ -86,7 +95,9 @@ Config loads after CLI parsing; explicit flags win.
 | `REBOOT_IF_REQUIRED` | `false` | Auto-reboot when `/var/run/reboot-required` is set |
 | `LOG_RETENTION` | `3` | Log files to keep under `/var/log/update-clean` |
 
-Further keys (`LOG_DIR`, `LOCKFILE`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) are in `update-clean.conf.example`.
+Further keys (`LOG_DIR`, `LOCKFILE`, `APT_LOCK_WAIT_SECS`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) are in `update-clean.conf.example`.
+
+**Recommended packages:** `psmisc` or `lsof` (APT lock holders), `jq` (last-run JSON and snap cleanup).
 
 ## Logging
 
@@ -143,7 +154,13 @@ scripts/package-release.sh
 tests/                   # Ubuntu 22.04 / 24.04 / Debian 12 harness
 ```
 
-`sudo ./tests/simulate_ubuntu.sh` bind-mounts fake `os-release` files (no Docker) and runs the real script. Last HTML report: `tests/last-results.html`.
+## Testing
+
+```bash
+sudo ./tests/simulate_ubuntu.sh
+```
+
+Bind-mounts Ubuntu 22.04, Ubuntu 24.04, and Debian 12 `os-release` files in a private mount namespace (no Docker) and runs the real script. HTML report: `tests/last-results.html`.
 
 ## License
 

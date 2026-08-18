@@ -32,7 +32,7 @@ cp -a \
     "$ROOT/update-clean.conf.example" \
     "$STAGE/$NAME/"
 
-cp -a "$ROOT/systemd" "$STAGE/$NAME/"
+cp -a "$ROOT/systemd" "$ROOT/tests" "$STAGE/$NAME/"
 
 TARBALL="$OUTDIR/${NAME}.tar.gz"
 tar -C "$STAGE" -czf "$TARBALL" "$NAME"
