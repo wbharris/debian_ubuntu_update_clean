@@ -63,7 +63,7 @@ LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.3"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.4"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -1259,8 +1259,17 @@ fi
 # ────────────────────────────────────────────────────────────────
 AFTER=$(get_used_kb_for_paths / /var /boot)
 FREED_MB=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
-if ! $DRY_RUN && [ "$AFTER" -gt "$BEFORE" ]; then
-    warn "Used space on /, /var, /boot increased during this run (logs or other growth)"
+DISK_LINE="Disk space change on tracked mounts (/, /var, /boot): ${FREED_MB} MB"
+MSG_DISK="Freed ${FREED_MB} MB on /, /var, /boot."
+if $DRY_RUN; then
+    FREED_MB="n/a"
+    DISK_LINE="Disk space change on tracked mounts (/, /var, /boot): n/a (dry-run)"
+    MSG_DISK="Dry-run (disk change not measured)."
+elif [ "$AFTER" -gt "$BEFORE" ]; then
+    INCREASED_MB=$(awk "BEGIN {printf \"%.2f\", ($AFTER - $BEFORE) / 1024 }")
+    warn "Net used space increased by ${INCREASED_MB} MB on /, /var, /boot (logs or other growth)"
+    DISK_LINE="Net used space increased by ${INCREASED_MB} MB on /, /var, /boot"
+    MSG_DISK="Used space increased by ${INCREASED_MB} MB on /, /var, /boot."
 fi
 
 REBOOT_REQUIRED_NOW=false
@@ -1330,7 +1339,7 @@ elif $DRY_RUN; then
     info "DRY-RUN: Would list services needing restart (needrestart is advisory only)"
 fi
 
-MSG="System update completed. Freed ${FREED_MB} MB on /, /var, /boot."
+MSG="System update completed. ${MSG_DISK}"
 if [ "$REBOOT_REQUIRED_NOW" = true ]; then
     MSG="$MSG Reboot recommended."
 fi
@@ -1342,7 +1351,7 @@ log_to_syslog "$MSG (failures=$EXIT_CODE)"
 
 log "=== Update Summary ==="
 log "Distro: $DISTRO_NAME"
-log "Disk space change on tracked mounts (/, /var, /boot): ${FREED_MB} MB"
+log "$DISK_LINE"
 log "Failures recorded: $EXIT_CODE"
 log "Full log saved to: $LOG_FILE"
 log "APT warnings logged to: $APT_LOG"

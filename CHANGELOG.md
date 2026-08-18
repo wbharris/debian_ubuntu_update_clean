@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.4] - 2026-08-18
+
+### Changed
+- If used space on `/` `/var` `/boot` grew, the summary says "Net used space increased by X MB" instead of a negative freed figure
+
 ## [1.5.3] - 2026-08-18
 
 ### Fixed / hardened

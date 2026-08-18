@@ -94,7 +94,7 @@ Further keys (`LOG_DIR`, `LOCKFILE`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) ar
 - Last run: `/var/lib/update-clean/last-run`
 - JSON (when `jq` is installed): `/var/lib/update-clean/last-run.json`
 - `sudo ./update-clean.sh --last` prints the record and the last 80 log lines
-- Disk-freed figure is `df` on `/`, `/var`, `/boot` only (warns if used space grew)
+- Disk change is `df` on `/`, `/var`, `/boot` only. If usage grew, the summary says it increased (not a negative “freed”)
 - `needrestart` (if installed) only **lists** services that need a restart; this script does not restart them
 
 ## Safety
