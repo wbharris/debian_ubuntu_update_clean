@@ -12,16 +12,13 @@ One clean update and cleanup script for **Debian** and **Ubuntu** (and other apt
 
 **Update:**
 - Fixes interrupted installs and broken packages
-- `apt update`
+- `apt-get update` / `upgrade` / `full-upgrade`
 - Package cache check (`apt-get check`)
-- `apt upgrade`
-- `apt full-upgrade`
 
 **Cleanup:**
-- `apt --purge autoremove`
-- `apt autoclean` + `apt clean`
-- Purge residual config files (`apt purge '~c'`)
-- Remove old kernels (keeps current + previous for safety)
+- `apt-get --purge autoremove`, `autoclean`, `clean`
+- Purge residual config files (`apt-get purge '~c'`)
+- Remove old kernels (running + `KERNEL_KEEP` newest extras)
 - Remove old snap revisions
 - Update + remove unused Flatpaks
 - Firmware updates (`fwupdmgr`)
@@ -45,20 +42,18 @@ One clean update and cleanup script for **Debian** and **Ubuntu** (and other apt
 sudo ./update-clean.sh
 ```
 
-Options:
-
 ```bash
 sudo ./update-clean.sh --dry-run
-sudo ./update-clean.sh --no-kernel
-sudo ./update-clean.sh --keep-kernels 3
-sudo ./update-clean.sh --reboot-if-required
-sudo ./update-clean.sh --offline
 sudo ./update-clean.sh --check
 sudo ./update-clean.sh --last
-sudo ./update-clean.sh --debug
+sudo ./update-clean.sh --no-kernel
+sudo ./update-clean.sh --reboot-if-required
+sudo ./update-clean.sh --offline
 ```
 
-**Dry-run:** skips `apt-get update` and logs planned `apt-get` commands instead of simulating them. It may still use the network for read-only listings (`apt list --upgradable`, autoremove preview).
+Kernel keep count and similar knobs live in the config file (below), not as extra flags.
+
+**Dry-run:** skips `apt-get update` and logs planned `apt-get` commands. It may still use the network for read-only listings.
 
 Run periodically (recommended weekly).
 
@@ -74,18 +69,16 @@ Optional config files (sourced in order if present):
 Example:
 
 ```bash
-LOG_RETENTION=5
 KERNEL_KEEP=2
 BACKUP_MODE=true
-ADMIN_EMAIL=admin@example.com
-CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
+REBOOT_IF_REQUIRED=false
 ```
 
 **Config security:** `/etc/update-clean.conf` must be owned by root (non-root-owned system config is skipped). User-level configs are sourced without ownership checks — only use configs you trust.
 
-**Precedence:** Config files load after CLI parsing; explicit flags like `--keep-kernels` and `--dry-run` override config file values.
+**Precedence:** Config files load after CLI parsing; explicit flags (`--dry-run`, `--no-kernel`, …) override config values.
 
-**KERNEL_KEEP:** number of installed kernel packages to retain *besides* the running kernel (default: 2; `0` keeps only the running kernel). Override with `--keep-kernels N` or `KERNEL_KEEP=N` in config.
+**KERNEL_KEEP:** newest extra kernels to keep besides the running one (default: 2). Set in config, not a public flag.
 
 **BACKUP_MODE:** when `true`, creates a `/var/backups/etc-before-cleanup-*.tar.gz` archive before purging residual config packages (excludes `/etc/ssl/private`, stays on local filesystem).
 
@@ -99,10 +92,10 @@ CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 
 ### Safety
 
-- Must run as root
-- Requires at least 2 GB free disk space
-- Keeps current + one previous kernel as fallback
-- Non-critical steps won't stop the script
+- Must run as root except `--check` / `--version` / `--last` / `--help`
+- Requires at least 2 GB free on `/` (and `/var` / `/boot` when present)
+- Keeps the running kernel plus `KERNEL_KEEP` newest extras
+- Non-critical steps will not stop the script
 
 ### Scheduling
 

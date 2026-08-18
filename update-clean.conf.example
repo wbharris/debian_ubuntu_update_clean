@@ -10,7 +10,7 @@
 # Number of log files to retain (default: 3)
 # LOG_RETENTION=5
 
-# Kernels to keep in addition to the running kernel (default: 2, max 10)
+# Newest extra kernels to keep besides the running one (default: 2, max 10)
 # KERNEL_KEEP=2
 
 # Optional path overrides

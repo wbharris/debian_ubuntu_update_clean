@@ -22,7 +22,7 @@
 # Logs: /var/log/update-clean/ (retention via LOG_RETENTION)
 # Exit codes: 0 = success; 1 = one or more failures (count in FAILURES / EXIT_CODE)
 #
-# Usage: sudo ./update-clean.sh [--dry-run] [--no-kernel] [--help] [--version]
+# Usage: sudo ./update-clean.sh [--dry-run] [--check] [--help] [--version]
 # Recommended: run weekly
 
 set -euo pipefail
@@ -81,6 +81,9 @@ CLI_SKIP_KERNEL=false
 CLI_SKIP_CONNECTIVITY=false
 CLI_REBOOT_IF_REQUIRED=false
 CLI_DEBUG=false
+CLI_CHECK=false
+CLI_LAST=false
+CLI_SHOW_VERSION=false
 
 # ────────────────────────────────────────────────────────────────
 # Colors (TTY-aware)
@@ -176,6 +179,7 @@ apply_cli_config_overrides() {
     $CLI_SKIP_CONNECTIVITY && SKIP_CONNECTIVITY=true
     $CLI_REBOOT_IF_REQUIRED && REBOOT_IF_REQUIRED=true
     $CLI_DEBUG && DEBUG=true
+    return 0
 }
 
 # ────────────────────────────────────────────────────────────────
@@ -705,28 +709,19 @@ usage() {
     cat << USAGE
 Usage: sudo $0 [options]
 
-Options:
-  --dry-run         Simulate actions without making changes
-  --no-kernel       Skip old kernel removal
-  --keep-kernels N  Keep N kernels besides running (default: 2; 0 = only running)
-  --reboot-if-required  Reboot automatically when required
-  --offline         Skip internet connectivity checks
-  --last, --status  Show information from the last run
-  --check, --doctor Run pre-flight checks only (no updates)
-  --debug           Enable shell trace (set -x) for troubleshooting
-  --help, -h        Show this help
-  --version, -v     Show version information
+  --dry-run              Plan only; make no changes
+  --check                Pre-flight checks, then exit
+  --last                 Show the last run
+  --no-kernel            Leave old kernels installed
+  --offline              Skip the network check
+  --reboot-if-required   Reboot if needed
+  -h, --help             Show this help
+  -v, --version          Show version
 
-Environment / Config:
-  LOG_RETENTION     Number of logs to keep (default: 3)
-  KERNEL_KEEP       Kernels to keep besides running (default: 2, max 10)
-  LOG_DIR           Log directory (default: /var/log/update-clean)
-  LOCKFILE          Instance lock file (default: /run/update-clean.lock)
-  LAST_RUN_DIR      Last-run record directory (default: /var/lib/update-clean)
-  BACKUP_MODE       Backup /etc before purging configs (default: false)
-  REBOOT_IF_REQUIRED Reboot automatically if required (default: false)
-  ADMIN_EMAIL       Optional email address for completion notification
-  CRITICAL_PACKAGES Array of packages to hold during cleanup
+Kernel keep count, log retention, and similar knobs belong in a
+config file — see update-clean.conf.example.
+
+Target: Debian, Ubuntu, and other apt-based systems
 USAGE
 }
 
@@ -741,7 +736,7 @@ show_version() {
         printf 'Commit: %s\n' "$commit"
     fi
 
-    local last_file="/var/lib/update-clean/last-run"
+    local last_file="${LAST_RUN_DIR:-/var/lib/update-clean}/last-run"
     if [ -f "$last_file" ]; then
         printf '\nLast run:\n'
         sed 's/^/  /' "$last_file"
@@ -749,7 +744,7 @@ show_version() {
 }
 
 show_last_run() {
-    local last_file="/var/lib/update-clean/last-run"
+    local last_file="${LAST_RUN_DIR:-/var/lib/update-clean}/last-run"
     local log_path
 
     if [ -f "$last_file" ]; then
@@ -810,7 +805,7 @@ run_preflight_checks() {
 
     printf 'Required tools: '
     local missing=""
-    for tool in apt dpkg; do
+    for tool in apt-get dpkg; do
         if ! has_cmd "$tool"; then
             missing="$missing $tool"
         fi
@@ -836,6 +831,7 @@ while [[ $# -gt 0 ]]; do
             CLI_SKIP_KERNEL=true
             shift
             ;;
+        # Compatibility: accepted, not advertised. Prefer KERNEL_KEEP in config.
         --keep-kernels)
             shift
             if [ $# -eq 0 ]; then
@@ -865,12 +861,12 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --last|--status)
-            show_last_run
-            exit 0
+            CLI_LAST=true
+            shift
             ;;
         --check|--doctor)
-            run_preflight_checks
-            exit 0
+            CLI_CHECK=true
+            shift
             ;;
         --debug)
             DEBUG=true
@@ -882,8 +878,8 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --version|-v)
-            show_version
-            exit 0
+            CLI_SHOW_VERSION=true
+            shift
             ;;
         *)
             error "Unknown option: $1"
@@ -896,7 +892,22 @@ done
 load_config_files
 apply_cli_config_overrides
 validate_config_values
+
+if [ "${CLI_LAST:-false}" = true ]; then
+    show_last_run
+    exit 0
+fi
+if [ "${CLI_SHOW_VERSION:-false}" = true ]; then
+    show_version
+    exit 0
+fi
+
 require_cmds
+
+if [ "${CLI_CHECK:-false}" = true ]; then
+    run_preflight_checks
+    exit 0
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 export APT_LISTCHANGES_FRONTEND=none

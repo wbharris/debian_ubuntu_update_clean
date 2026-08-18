@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.0] - 2026-08-18
+
+### Changed
+- Slimmer CLI: `--help` and the README list the flags you actually type
+- `--last`, `--check`, and `--version` run after config load so they honor config paths
+- Kernel keep count (`--keep-kernels`) and `--debug` stay as hidden compatibility flags; prefer `KERNEL_KEEP` in config
+
+### Notes
+- Still accepted, no longer advertised: `--keep-kernels`, `--debug`, and the aliases `--status`, `--doctor`
+
 ## [1.4.8] - 2026-06-22
 
 ### Added
