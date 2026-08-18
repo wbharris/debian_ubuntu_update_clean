@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.5] - 2026-08-18
+
+### Changed
+- Disk summary: `NET_MB_SIGNED` for last-run/JSON, `SUMMARY_TEXT` for humans (no behavior change)
+
 ## [1.5.4] - 2026-08-18
 
 ### Changed

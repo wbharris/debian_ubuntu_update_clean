@@ -63,7 +63,7 @@ LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.4"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.5"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -1258,18 +1258,21 @@ fi
 # Final status & summary
 # ────────────────────────────────────────────────────────────────
 AFTER=$(get_used_kb_for_paths / /var /boot)
-FREED_MB=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
-DISK_LINE="Disk space change on tracked mounts (/, /var, /boot): ${FREED_MB} MB"
-MSG_DISK="Freed ${FREED_MB} MB on /, /var, /boot."
+# Machine value: used(before) - used(after) on /, /var, /boot. Negative if usage grew.
+NET_MB_SIGNED=$(calc_disk_freed_mb "$BEFORE" "$AFTER")
+FREED_MB=$NET_MB_SIGNED
+
 if $DRY_RUN; then
-    FREED_MB="n/a"
-    DISK_LINE="Disk space change on tracked mounts (/, /var, /boot): n/a (dry-run)"
+    SUMMARY_TEXT="Disk space change on tracked mounts (/, /var, /boot): n/a (dry-run)"
     MSG_DISK="Dry-run (disk change not measured)."
 elif [ "$AFTER" -gt "$BEFORE" ]; then
     INCREASED_MB=$(awk "BEGIN {printf \"%.2f\", ($AFTER - $BEFORE) / 1024 }")
     warn "Net used space increased by ${INCREASED_MB} MB on /, /var, /boot (logs or other growth)"
-    DISK_LINE="Net used space increased by ${INCREASED_MB} MB on /, /var, /boot"
+    SUMMARY_TEXT="Net used space increased by ${INCREASED_MB} MB on /, /var, /boot"
     MSG_DISK="Used space increased by ${INCREASED_MB} MB on /, /var, /boot."
+else
+    SUMMARY_TEXT="Disk space change on tracked mounts (/, /var, /boot): freed ${NET_MB_SIGNED} MB"
+    MSG_DISK="Freed ${NET_MB_SIGNED} MB on /, /var, /boot."
 fi
 
 REBOOT_REQUIRED_NOW=false
@@ -1351,7 +1354,7 @@ log_to_syslog "$MSG (failures=$EXIT_CODE)"
 
 log "=== Update Summary ==="
 log "Distro: $DISTRO_NAME"
-log "$DISK_LINE"
+log "$SUMMARY_TEXT"
 log "Failures recorded: $EXIT_CODE"
 log "Full log saved to: $LOG_FILE"
 log "APT warnings logged to: $APT_LOG"
