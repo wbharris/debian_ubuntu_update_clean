@@ -21,3 +21,6 @@ push.sh
 cleanup-push.sh
 *.bak
 *.bak-*
+
+# Release build output
+dist/

@@ -16,6 +16,7 @@ All notable changes to this project are documented here.
 - Preferred lock helper is `apt_lock_held` (`is_apt_locked` kept as an alias)
 - `/boot` hard abort is 100 MB; 2 GB still applies to `/` and `/var`
 - Dry-run previews use `apt-get -s` and say they show the first 40 lines
+- First GitHub Release (`v1.5.2`) with a versioned tarball + `releases/latest` asset
 
 ## [1.5.1] - 2026-08-18
 

@@ -35,6 +35,29 @@ Kernel keep count, log retention, and similar knobs live in the config file, not
 
 Requires **Bash 4+** (`#!/usr/bin/env bash`). Do not run under `/bin/sh`.
 
+## Install
+
+**From the latest [GitHub Release](https://github.com/wbharris/debian_ubuntu_update_clean/releases/latest)** (no version pin):
+
+```bash
+curl -fsSL -o debian_ubuntu_update_clean.tar.gz \
+  https://github.com/wbharris/debian_ubuntu_update_clean/releases/latest/download/debian_ubuntu_update_clean.tar.gz
+tar -xzf debian_ubuntu_update_clean.tar.gz
+cd debian_ubuntu_update_clean
+sudo install -m 755 update-clean.sh /usr/local/sbin/update-clean.sh
+sudo cp systemd/update-clean.service systemd/update-clean.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now update-clean.timer
+```
+
+**From git (development):**
+
+```bash
+git clone https://github.com/wbharris/debian_ubuntu_update_clean.git
+cd debian_ubuntu_update_clean
+sudo install -m 755 update-clean.sh /usr/local/sbin/update-clean.sh
+```
+
 Run weekly. Prefer a maintenance window if you use `--reboot-if-required`.
 
 ## Configuration
@@ -114,7 +137,8 @@ update-clean.sh
 VERSION / CHANGELOG.md / README.md / LICENSE
 update-clean.conf.example
 systemd/                 # optional weekly timer
-.github/workflows/       # ShellCheck
+.github/workflows/       # ShellCheck + release
+scripts/package-release.sh
 ```
 
 ## License
