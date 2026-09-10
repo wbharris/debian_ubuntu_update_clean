@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.7] - 2026-09-10
+
+### Added
+- `JOURNAL_VACUUM_TIME` (default `30d`) instead of a hardcoded 30-day vacuum
+- `CLEAN_DEV_CACHES` (default **false**) — opt-in wipe of regenerable `pip` / `go-build` / `uv` caches under `/root` and the sudo user. Next pip/go/uv job rebuilds them. Leave off on servers.
+
 ## [1.5.6] - 2026-08-18
 
 ### Added

@@ -10,7 +10,7 @@ For Ubuntu AI / GPU compute blades, see [`ai_blade_ubuntu_update_clean`](https:/
 
 **Update:** fix interrupted installs, then `apt-get update` / `upgrade` / `full-upgrade` and `apt-get check`. Mutating work uses **`apt-get`**, not `apt(8)`.
 
-**Cleanup:** purge autoremove, autoclean, residual configs, old kernels (running + the `KERNEL_KEEP` newest extras), Snap/Flatpak when present, `fwupd` when installed, journal vacuum, partial apt lists, man/locate DBs, GRUB after kernel changes.
+**Cleanup:** purge autoremove, autoclean, residual configs, old kernels (running + the `KERNEL_KEEP` newest extras), Snap/Flatpak when present, `fwupd` when installed, journal vacuum (`JOURNAL_VACUUM_TIME`, default 30d), optional regenerable pip/go/uv caches (`CLEAN_DEV_CACHES`, default off), partial apt lists, man/locate DBs, GRUB after kernel changes.
 
 **Also:** Debian vs Ubuntu archive host for connectivity, disk change on `/` `/var` `/boot`, log rotation, last-run record, root / disk / APT-lock checks.
 
@@ -94,6 +94,8 @@ Config loads after CLI parsing; explicit flags win.
 | `BACKUP_MODE` | `false` | Tar `/etc` before purging residual configs (excludes `/etc/ssl/private`) |
 | `REBOOT_IF_REQUIRED` | `false` | Auto-reboot when `/var/run/reboot-required` is set |
 | `LOG_RETENTION` | `3` | Log files to keep under `/var/log/update-clean` |
+| `JOURNAL_VACUUM_TIME` | `30d` | `journalctl --vacuum-time` window |
+| `CLEAN_DEV_CACHES` | `false` | If true, remove `/root` (and sudo user) `.cache/{pip,go-build,uv}`. Off by default so servers do not rebuild package caches every week. |
 
 Further keys (`LOG_DIR`, `LOCKFILE`, `APT_LOCK_WAIT_SECS`, `ADMIN_EMAIL`, `CRITICAL_PACKAGES`, …) are in `update-clean.conf.example`.
 

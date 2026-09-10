@@ -13,6 +13,14 @@
 # Newest extra kernels to keep besides the running one (default: 2, max 10)
 # KERNEL_KEEP=2
 
+# journalctl --vacuum-time (default: 30d)
+# JOURNAL_VACUUM_TIME=14d
+
+# Wipe regenerable pip/go-build/uv caches (default: false — safe for servers).
+# Next pip/go/uv job is slower until the cache rebuilds. Enable on workstations
+# that accumulate multi-GB ~/.cache/pip. Does not delete project trees.
+# CLEAN_DEV_CACHES=true
+
 # Optional path overrides
 # LOG_DIR=/var/log/update-clean
 # LOCKFILE=/run/update-clean.lock

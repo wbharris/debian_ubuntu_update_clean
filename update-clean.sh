@@ -57,13 +57,17 @@ KERNEL_KEEP=${KERNEL_KEEP:-2}
 KERNEL_KEEP_MAX=${KERNEL_KEEP_MAX:-10}
 BACKUP_MODE=${BACKUP_MODE:-false}
 REBOOT_IF_REQUIRED=${REBOOT_IF_REQUIRED:-false}
+# journalctl --vacuum-time (e.g. 30d, 14d, 7d)
+JOURNAL_VACUUM_TIME=${JOURNAL_VACUUM_TIME:-30d}
+# Workstation opt-in: wipe regenerable pip/go-build/uv caches. Default off on servers.
+CLEAN_DEV_CACHES=${CLEAN_DEV_CACHES:-false}
 LOG_DIR="${LOG_DIR:-/var/log/update-clean}"
 LOCKFILE="${LOCKFILE:-/run/update-clean.lock}"
 LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.6"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.7"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -197,6 +201,52 @@ validate_config_values() {
         warn "Invalid APT_LOCK_POLL_SECS; using 5"
         APT_LOCK_POLL_SECS=5
     fi
+    if [ -z "${JOURNAL_VACUUM_TIME:-}" ]; then
+        JOURNAL_VACUUM_TIME=30d
+    fi
+    case "${CLEAN_DEV_CACHES,,}" in
+        true|false|yes|no|1|0|on|off) ;;
+        *)
+            warn "Invalid CLEAN_DEV_CACHES='$CLEAN_DEV_CACHES', using false"
+            CLEAN_DEV_CACHES=false
+            ;;
+    esac
+}
+
+_is_truthy() {
+    case "${1,,}" in
+        true|yes|on|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Regenerable toolchain caches only (not GOPATH/project trees). Off by default.
+clean_dev_caches() {
+    local home dir cache size
+    local -a homes=()
+    local -a caches=(pip go-build uv)
+
+    homes+=("/root")
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6 || true)
+        if [ -n "$home" ] && [ -d "$home" ]; then
+            homes+=("$home")
+        fi
+    fi
+
+    for home in "${homes[@]}"; do
+        for cache in "${caches[@]}"; do
+            dir="$home/.cache/$cache"
+            [ -e "$dir" ] || continue
+            size=$(du -sh "$dir" 2>/dev/null | awk '{print $1}')
+            if [ "${DRY_RUN}" = true ]; then
+                info "DRY-RUN: Would remove $dir ($size)"
+                continue
+            fi
+            info "Removing regenerable cache $dir ($size)"
+            rm -rf -- "$dir" || warn "Failed to remove $dir"
+        done
+    done
 }
 
 apply_cli_config_overrides() {
@@ -1229,11 +1279,18 @@ if has_cmd fwupdmgr; then
     fi
 fi
 
+if _is_truthy "$CLEAN_DEV_CACHES"; then
+    clean_dev_caches
+else
+    info "Skipping pip/go-build/uv cache cleanup (CLEAN_DEV_CACHES=$CLEAN_DEV_CACHES)"
+fi
+
 if has_cmd journalctl; then
     if $DRY_RUN; then
-        info "DRY-RUN: Would vacuum journal logs"
+        info "DRY-RUN: Would vacuum journal logs (vacuum-time=${JOURNAL_VACUUM_TIME})"
     else
-        safe_run "Vacuuming journal logs (last 30 days)" journalctl --vacuum-time=30d
+        safe_run "Vacuuming journal logs (vacuum-time=${JOURNAL_VACUUM_TIME})" \
+            journalctl --vacuum-time="${JOURNAL_VACUUM_TIME}"
     fi
 fi
 
