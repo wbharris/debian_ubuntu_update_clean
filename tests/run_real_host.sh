@@ -74,19 +74,15 @@ fi
 HOLDS_AFTER=$(apt-mark showhold 2>/dev/null || true)
 [ "$HOLDS_AFTER" = "$HOLDS_BEFORE" ] && pass "holds unchanged after dry-run" || fail_case "holds unchanged after dry-run"
 
-# Held kernel still lists as installed (same awk as update-clean.sh).
+# Held kernel still lists as installed (list_installed_kernel_images + DPKG_STATUS_INSTALLED_RE).
+# shellcheck source=../update-clean.sh
+source "$UC"
 KERN_PKG=$(dpkg-query -S "/boot/vmlinuz-$(uname -r)" 2>/dev/null | awk -F: '{print $1}' | head -n1 || true)
 if [ -z "$KERN_PKG" ]; then
     fail_case "map running kernel to linux-image package"
 else
     apt-mark hold "$KERN_PKG" >/dev/null 2>&1 || true
-    listed=$(
-        dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
-            | awk -F'\t' '$1 ~ /^(install|hold) ok installed$/ {print $2}' \
-            | grep -E '^linux-image(-unsigned)?-[0-9]' \
-            | grep -Ev -- '-(meta|dbg|dbgsym|rt|cloud|kvm|virtual)$' \
-            || true
-    )
+    listed=$(list_installed_kernel_images || true)
     printf '%s\n' "$listed" | grep -Fxq "$KERN_PKG" \
         && pass "held kernel still listed ($KERN_PKG)" \
         || fail_case "held kernel still listed ($KERN_PKG)"
@@ -106,9 +102,9 @@ else
     pass "not EFI (skip grub-pc assertion)"
 fi
 
-grep -Eq 'install\|hold\) ok installed' "$UC" \
-    && pass "script matches hold ok installed" \
-    || fail_case "script matches hold ok installed"
+[ -n "${DPKG_STATUS_INSTALLED_RE:-}" ] \
+    && pass "DPKG_STATUS_INSTALLED_RE sourced from script" \
+    || fail_case "DPKG_STATUS_INSTALLED_RE sourced from script"
 
 printf '\n=== %s passed, %s failed ===\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

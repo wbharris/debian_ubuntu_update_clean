@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.11] - 2026-09-16
+
+### Changed
+- Single `DPKG_STATUS_INSTALLED_RE` for installed-like dpkg states (`install` and `hold`). `list_installed_kernel_images`, related-kernel purge, and tests all use it. The script can be `source`d (CLI is skipped) so tests cannot drift from runtime.
+
 ## [1.5.10] - 2026-09-16
 
 ### Added

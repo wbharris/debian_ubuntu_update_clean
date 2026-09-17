@@ -163,7 +163,7 @@ sudo ./tests/simulate_ubuntu.sh
 sudo ./tests/run_real_host.sh
 ```
 
-`simulate_ubuntu.sh` bind-mounts Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, and Debian 12 `os-release` files in a private mount namespace (no Docker). HTML report: `tests/last-results.html`.
+`simulate_ubuntu.sh` bind-mounts Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, and Debian 12 `os-release` files in a private mount namespace (no Docker). It `source`s `update-clean.sh` (CLI skipped) so held-kernel tests use `DPKG_STATUS_INSTALLED_RE` from the script. HTML report: `tests/last-results.html`.
 
 `run_real_host.sh` is a **live** root harness on this machine: `--check`, a 90s `--dry-run` (no `dpkg --configure` / no `apt-mark hold` / no unbounded `sync`), held-kernel listing, and EFI `grub-pc` skip. It isolates logs and the instance lock under `$TMPDIR`.
 

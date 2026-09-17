@@ -67,7 +67,7 @@ LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.10"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.11"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -77,6 +77,10 @@ readonly SCRIPT_DIR
 EXIT_CODE=0
 KERNELS_REMOVED=false
 HELD_THIS_RUN=()
+
+# dpkg ${Status}: "install ok installed" until apt-mark hold, then "hold ok installed".
+# Shared by kernel listing, related-kernel purge, and sourced tests.
+readonly DPKG_STATUS_INSTALLED_RE='^(install|hold) ok installed$'
 
 # Thresholds and retry limits (override via env if needed)
 readonly MIN_DISK_KB=${MIN_DISK_KB:-2097152}       # 2 GB on / and /var
@@ -412,7 +416,7 @@ is_apt_locked() { apt_lock_held; }
 
 list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
-        | awk -F'\t' '$1 ~ /^(install|hold) ok installed$/ {print $2}' \
+        | awk -F'\t' -v re="$DPKG_STATUS_INSTALLED_RE" '$1 ~ re {print $2}' \
         | grep -E '^linux-image(-unsigned)?-[0-9]' \
         | grep -Ev -- '-(meta|dbg|dbgsym|rt|cloud|kvm|virtual)$' \
         | grep -Ev 'linux-image-(generic|generic-hwe|amd64)(-lts|-hwe)?$' \
@@ -564,7 +568,7 @@ purge_kernel_related() {
         ver="${BASH_REMATCH[1]}"
         for suffix in headers modules-extra modules modules-unsigned; do
             candidate="linux-${suffix}-${ver}"
-            if dpkg-query -W -f='${Status}' "$candidate" 2>/dev/null | grep -Eq '^(install|hold) ok installed$'; then
+            if dpkg-query -W -f='${Status}' "$candidate" 2>/dev/null | grep -Eq -- "$DPKG_STATUS_INSTALLED_RE"; then
                 apt_run purge "$candidate" || true
             fi
         done
@@ -985,6 +989,11 @@ run_preflight_checks() {
 
     printf '%s\n' "=== Checks complete ==="
 }
+
+# Sourced by tests (functions + defaults only). Do not run CLI when sourced.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in

@@ -6,7 +6,7 @@
 # Usage: ./tests/simulate_ubuntu.sh
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 UC="$ROOT/update-clean.sh"
 SIM=$(mktemp -d "${TMPDIR:-/tmp}/ubuntu-sim.XXXXXX")
 PASS=0
@@ -18,6 +18,8 @@ if [ ! -x "$UC" ]; then
     printf 'missing %s\n' "$UC" >&2
     exit 1
 fi
+# shellcheck source=../update-clean.sh
+source "$UC"
 if [ "$EUID" -ne 0 ]; then
     printf 'this harness needs root (unshare --mount + dry-run)\n' >&2
     exit 1
@@ -232,14 +234,13 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# 12) held packages still count as installed (apt-mark hold → "hold ok installed")
-status_re='^(install|hold) ok installed$'
+# 12) held packages still count as installed (canonical DPKG_STATUS_INSTALLED_RE)
 held_list=$(
     printf '%s\n' \
         $'hold ok installed\tlinux-image-7.0.0-31-generic' \
         $'install ok installed\tlinux-image-6.8.0-40-generic' \
         $'unknown ok not-installed\tlinux-image-unsigned-7.0.0-31-generic' \
-        | awk -F'\t' -v re="$status_re" '$1 ~ re {print $2}'
+        | awk -F'\t' -v re="$DPKG_STATUS_INSTALLED_RE" '$1 ~ re {print $2}'
 )
 if printf '%s\n' "$held_list" | grep -Fq 'linux-image-7.0.0-31-generic' \
     && printf '%s\n' "$held_list" | grep -Fq 'linux-image-6.8.0-40-generic' \
