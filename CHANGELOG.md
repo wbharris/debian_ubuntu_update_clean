@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.9] - 2026-09-16
+
+### Fixed
+- Kernel image listing treats `hold ok installed` as installed. The running kernel is held before purge, so `install ok installed` alone made Ubuntu 26.04 look like it had no linux-image packages.
+
 ## [1.5.8] - 2026-09-16
 
 ### Fixed

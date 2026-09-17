@@ -232,6 +232,25 @@ else
     FAIL=$((FAIL + 1))
 fi
 
+# 12) held packages still count as installed (apt-mark hold → "hold ok installed")
+status_re='^(install|hold) ok installed$'
+held_list=$(
+    printf '%s\n' \
+        $'hold ok installed\tlinux-image-7.0.0-31-generic' \
+        $'install ok installed\tlinux-image-6.8.0-40-generic' \
+        $'unknown ok not-installed\tlinux-image-unsigned-7.0.0-31-generic' \
+        | awk -F'\t' -v re="$status_re" '$1 ~ re {print $2}'
+)
+if printf '%s\n' "$held_list" | grep -Fq 'linux-image-7.0.0-31-generic' \
+    && printf '%s\n' "$held_list" | grep -Fq 'linux-image-6.8.0-40-generic' \
+    && ! printf '%s\n' "$held_list" | grep -Fq 'linux-image-unsigned-7.0.0-31-generic'; then
+    printf '  PASS  kernel status includes hold ok installed\n'
+    PASS=$((PASS + 1))
+else
+    printf '  FAIL  kernel status includes hold ok installed\n'
+    FAIL=$((FAIL + 1))
+fi
+
 printf '\n=== %s passed, %s failed ===\n' "$PASS" "$FAIL"
 if [ "$FAIL" -gt 0 ]; then
     printf '\n--- artifacts in %s ---\n' "$SIM"

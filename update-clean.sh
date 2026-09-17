@@ -67,7 +67,7 @@ LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.8"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.9"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -412,7 +412,7 @@ is_apt_locked() { apt_lock_held; }
 
 list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
-        | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
+        | awk -F'\t' '$1 ~ /^(install|hold) ok installed$/ {print $2}' \
         | grep -E '^linux-image(-unsigned)?-[0-9]' \
         | grep -Ev -- '-(meta|dbg|dbgsym|rt|cloud|kvm|virtual)$' \
         | grep -Ev 'linux-image-(generic|generic-hwe|amd64)(-lts|-hwe)?$' \
@@ -564,7 +564,7 @@ purge_kernel_related() {
         ver="${BASH_REMATCH[1]}"
         for suffix in headers modules-extra modules modules-unsigned; do
             candidate="linux-${suffix}-${ver}"
-            if dpkg-query -W -f='${Status}' "$candidate" 2>/dev/null | grep -q 'install ok installed'; then
+            if dpkg-query -W -f='${Status}' "$candidate" 2>/dev/null | grep -Eq '^(install|hold) ok installed$'; then
                 apt_run purge "$candidate" || true
             fi
         done
