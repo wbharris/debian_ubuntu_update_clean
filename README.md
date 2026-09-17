@@ -153,7 +153,7 @@ update-clean.conf.example
 systemd/                 # optional weekly timer
 .github/workflows/       # ShellCheck + release
 scripts/package-release.sh
-tests/                   # Ubuntu 22.04 / 24.04 / Debian 12 harness
+tests/                   # Ubuntu 22.04 / 24.04 / 26.04 / Debian 12 harness
 ```
 
 ## Testing
@@ -162,7 +162,7 @@ tests/                   # Ubuntu 22.04 / 24.04 / Debian 12 harness
 sudo ./tests/simulate_ubuntu.sh
 ```
 
-Bind-mounts Ubuntu 22.04, Ubuntu 24.04, and Debian 12 `os-release` files in a private mount namespace (no Docker) and runs the real script. HTML report: `tests/last-results.html`.
+Bind-mounts Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, and Debian 12 `os-release` files in a private mount namespace (no Docker) and runs the real script. HTML report: `tests/last-results.html`.
 
 ## License
 
