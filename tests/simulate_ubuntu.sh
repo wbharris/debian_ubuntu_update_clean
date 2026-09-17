@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Run update-clean.sh as Ubuntu 22.04, Ubuntu 24.04, and Debian 12 by
+# Run update-clean.sh as Ubuntu 22.04, 24.04, 26.04, and Debian 12 by
 # bind-mounting a fake /etc/os-release inside a private mount namespace.
 # No container daemon required.
 #
 # Usage: ./tests/simulate_ubuntu.sh
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UC="$ROOT/update-clean.sh"
 SIM=$(mktemp -d "${TMPDIR:-/tmp}/ubuntu-sim.XXXXXX")
 PASS=0
@@ -58,6 +58,17 @@ VERSION_ID="12"
 VERSION="12 (bookworm)"
 ID=debian
 VERSION_CODENAME=bookworm
+EOF
+
+cat >"$SIM/os-ubuntu-2604" <<'EOF'
+PRETTY_NAME="Ubuntu 26.04.1 LTS"
+NAME="Ubuntu"
+VERSION_ID="26.04"
+VERSION="26.04.1 LTS (Resolute Raccoon)"
+ID=ubuntu
+ID_LIKE=debian
+VERSION_CODENAME=resolute
+UBUNTU_CODENAME=resolute
 EOF
 
 run_as() {
@@ -124,7 +135,7 @@ rc=0
 run_as "$SIM/os-ubuntu-2204" "$out" --version || rc=$?
 expect_rc "jammy --version exit" "$rc" 0
 expect_grep "jammy pretty name" "$out" "Ubuntu 22.04"
-expect_grep "jammy version id" "$out" "update-clean 1\.5"
+expect_grep "jammy version id" "$out" "update-clean 1\\.5"
 
 # 2) Ubuntu 24.04 --check
 out="$SIM/02-noble-check.txt"
@@ -152,6 +163,8 @@ expect_grep "jammy dry-run banner" "$out" "DRY RUN MODE ENABLED"
 expect_grep "jammy skip kernel" "$out" "Skipping old kernel removal"
 expect_grep "jammy would upgrade" "$out" "DRY-RUN: would run: apt-get -y upgrade|Would run: apt-get"
 expect_grep "jammy preview note" "$out" "first 40 lines|DRY-RUN preview"
+expect_grep "jammy dry-run skip dpkg configure" "$out" "DRY-RUN: would run: dpkg --configure -a"
+expect_no_grep "jammy dry-run no apt-mark hold" "$out" "set on hold"
 
 # 5) --check --offline either order on noble
 out="$SIM/05-order.txt"
@@ -195,6 +208,27 @@ if flock -n 9; then
     expect_grep "already running" "$out" "already running"
 else
     printf '  FAIL  could not take test lock\n'
+    FAIL=$((FAIL + 1))
+fi
+
+# 10) Ubuntu 26.04 --check
+out="$SIM/10-resolute-check.txt"
+rc=0
+run_as "$SIM/os-ubuntu-2604" "$out" --check --offline || rc=$?
+expect_rc "resolute --check exit" "$rc" 0
+expect_grep "resolute distro" "$out" "Ubuntu 26.04"
+expect_grep "resolute archive" "$out" "archive.ubuntu.com"
+
+# 11) kernel image regex (must accept 7.0.0-31; old [.\\-+] class is an invalid grep range)
+kern_re='^linux-image(-unsigned)?-[0-9]'
+if printf '%s\n' 'linux-image-7.0.0-31-generic' 'linux-image-unsigned-6.8.0-40-generic' \
+        | grep -E "$kern_re" | grep -Fq 'linux-image-7.0.0-31-generic' \
+    && ! printf '%s\n' 'linux-image-generic' 'linux-image-generic-hwe-26.04' \
+        | grep -Eq "$kern_re"; then
+    printf '  PASS  kernel image regex (7.0.0-31)\n'
+    PASS=$((PASS + 1))
+else
+    printf '  FAIL  kernel image regex (7.0.0-31)\n'
     FAIL=$((FAIL + 1))
 fi
 
