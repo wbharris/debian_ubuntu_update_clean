@@ -67,7 +67,7 @@ LAST_RUN_DIR="${LAST_RUN_DIR:-/var/lib/update-clean}"
 CRITICAL_PACKAGES=(base-files base-passwd bash coreutils util-linux)
 readonly SCRIPT_NAME="update-clean"
 # Sidecar VERSION (git tree) wins; embedded fallback for single-file install.
-readonly SCRIPT_VERSION_EMBEDDED="1.5.7"
+readonly SCRIPT_VERSION_EMBEDDED="1.5.8"
 if [ -r "$SCRIPT_DIR/VERSION" ]; then
     SCRIPT_VERSION=$(tr -d '[:space:]' <"$SCRIPT_DIR/VERSION")
 else
@@ -76,6 +76,7 @@ fi
 readonly SCRIPT_DIR
 EXIT_CODE=0
 KERNELS_REMOVED=false
+HELD_THIS_RUN=()
 
 # Thresholds and retry limits (override via env if needed)
 readonly MIN_DISK_KB=${MIN_DISK_KB:-2097152}       # 2 GB on / and /var
@@ -412,7 +413,7 @@ is_apt_locked() { apt_lock_held; }
 list_installed_kernel_images() {
     dpkg-query -W -f='${Status}\t${Package}\n' 'linux-image-*' 2>/dev/null \
         | awk -F'\t' '$1 ~ /^install ok installed/ {print $2}' \
-        | grep -E '^linux-image(-unsigned)?-[0-9][0-9a-zA-Z.\-+]*' \
+        | grep -E '^linux-image(-unsigned)?-[0-9]' \
         | grep -Ev -- '-(meta|dbg|dbgsym|rt|cloud|kvm|virtual)$' \
         | grep -Ev 'linux-image-(generic|generic-hwe|amd64)(-lts|-hwe)?$' \
         | sort -V \
@@ -778,17 +779,64 @@ remove_disabled_snaps() {
 }
 
 hold_critical_packages() {
-    local curpkg
+    local curpkg already p
     local -a to_hold=()
 
     curpkg=$(find_running_kernel_pkg "$(uname -r)" || true)
     to_hold=("${CRITICAL_PACKAGES[@]}")
     [ -n "$curpkg" ] && to_hold+=("$curpkg")
     [ "${#to_hold[@]}" -eq 0 ] && return 0
-    if ! apt-mark hold "${to_hold[@]}" 2>&1 | tee -a "${APT_LOG:-/dev/null}"; then
+
+    if $DRY_RUN; then
+        info "DRY-RUN: would run: apt-mark hold ${to_hold[*]}"
+        return 0
+    fi
+
+    already=$(apt-mark showhold 2>/dev/null || true)
+    HELD_THIS_RUN=()
+    for p in "${to_hold[@]}"; do
+        if printf '%s\n' "$already" | grep -Fxq -- "$p"; then
+            continue
+        fi
+        HELD_THIS_RUN+=("$p")
+    done
+    [ "${#HELD_THIS_RUN[@]}" -eq 0 ] && return 0
+    if ! apt-mark hold "${HELD_THIS_RUN[@]}" 2>&1 | tee -a "${APT_LOG:-/dev/null}"; then
         warn "apt-mark hold failed — critical packages may not be protected from autoremove"
         _record_failure
     fi
+}
+
+unhold_critical_packages() {
+    [ "${#HELD_THIS_RUN[@]}" -eq 0 ] && return 0
+    apt-mark unhold "${HELD_THIS_RUN[@]}" >/dev/null 2>&1 || true
+    HELD_THIS_RUN=()
+}
+
+purge_residual_configs() {
+    local -a rc_pkgs=() skip=() filtered=()
+    local p
+
+    mapfile -t rc_pkgs < <(
+        dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null \
+            | awk '$1 == "rc" { print $2 }' || true
+    )
+    [ "${#rc_pkgs[@]}" -eq 0 ] && return 0
+
+    if [ -d /sys/firmware/efi ]; then
+        skip=(grub-pc grub-pc-bin grub-gfxpayload-lists)
+    fi
+
+    for p in "${rc_pkgs[@]}"; do
+        [ -z "$p" ] && continue
+        if [ "${#skip[@]}" -gt 0 ] && printf '%s\n' "${skip[@]}" | grep -Fxq -- "$p"; then
+            info "Skipping residual purge of $p on EFI (grub-efi in use)"
+            continue
+        fi
+        filtered+=("$p")
+    done
+    [ "${#filtered[@]}" -eq 0 ] && return 0
+    apt_run purge "${filtered[@]}"
 }
 
 send_completion_notification() {
@@ -1154,7 +1202,15 @@ cleanup() {
     trap - INT TERM EXIT ERR
 
     local rc=${1:-$?}
-    sync 2>/dev/null || true
+    unhold_critical_packages
+    if ! $DRY_RUN; then
+        # LUKS/LVM hosts can stall indefinitely in uninterruptible sync.
+        if has_cmd timeout; then
+            timeout 15 sync 2>/dev/null || true
+        else
+            sync 2>/dev/null || true
+        fi
+    fi
     flock -u 200 2>/dev/null || true
     exec 200>&- 2>/dev/null || true
     rm -f "$LOCKFILE" 2>/dev/null || true
@@ -1171,7 +1227,9 @@ trap 'cleanup $?' INT TERM EXIT
 # Core update
 # ────────────────────────────────────────────────────────────────
 info "Configuring any interrupted package installations..."
-if ! dpkg --configure -a; then
+if $DRY_RUN; then
+    info "DRY-RUN: would run: dpkg --configure -a"
+elif ! dpkg --configure -a; then
     warn "dpkg --configure -a had issues"
     _record_failure
 fi
@@ -1228,9 +1286,8 @@ else
         create_etc_backup || true
     fi
 
-    # '~c' is an apt/dpkg selection: packages in "rc" state (removed, config remains)
     info "Purging residual configuration files..."
-    apt_run purge '~c' || warn "Purging residual configs had issues"
+    purge_residual_configs || warn "Purging residual configs had issues"
 fi
 
 if $SKIP_KERNEL; then
