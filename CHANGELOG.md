@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.8] - 2026-09-16
+
+### Fixed
+- Always `apt-mark unhold` packages this run held (success, error, and interrupt). Previously `bash` / `coreutils` / the running kernel could stay on hold.
+- `--dry-run` no longer runs `dpkg --configure -a`, `apt-mark hold`, or `sync`
+- Kernel image listing: GNU grep treated `[.\\-+]` as an invalid range (`. `→`+`), so Ubuntu 26.04 (`linux-image-7.0.0-31-generic`) looked like "No linux-image packages found"
+- Residual `~c` purge skipped `grub-pc` on EFI so it cannot fight `grub-efi-amd64`
+- Bound live-run `sync` with `timeout 15` (LUKS/LVM hosts could stall in D-state)
+
 ## [1.5.7] - 2026-09-10
 
 ### Added
