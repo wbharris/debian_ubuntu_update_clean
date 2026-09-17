@@ -160,9 +160,12 @@ tests/                   # Ubuntu 22.04 / 24.04 / 26.04 / Debian 12 harness
 
 ```bash
 sudo ./tests/simulate_ubuntu.sh
+sudo ./tests/run_real_host.sh
 ```
 
-Bind-mounts Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, and Debian 12 `os-release` files in a private mount namespace (no Docker) and runs the real script. HTML report: `tests/last-results.html`.
+`simulate_ubuntu.sh` bind-mounts Ubuntu 22.04, Ubuntu 24.04, Ubuntu 26.04, and Debian 12 `os-release` files in a private mount namespace (no Docker). HTML report: `tests/last-results.html`.
+
+`run_real_host.sh` is a **live** root harness on this machine: `--check`, a 90s `--dry-run` (no `dpkg --configure` / no `apt-mark hold` / no unbounded `sync`), held-kernel listing, and EFI `grub-pc` skip. It isolates logs and the instance lock under `$TMPDIR`.
 
 ## License
 

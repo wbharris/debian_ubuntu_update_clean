@@ -2,6 +2,11 @@
 
 All notable changes to this project are documented here.
 
+## [1.5.10] - 2026-09-16
+
+### Added
+- `tests/run_real_host.sh` — root tests on a live Debian/Ubuntu machine (`--check`, timed `--dry-run`, hold leak, held-kernel listing, EFI `grub-pc` skip)
+
 ## [1.5.9] - 2026-09-16
 
 ### Fixed
